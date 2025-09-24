@@ -1,7 +1,19 @@
-// Clarity: centralized types for Worker <-> DO RPC
-// Keep fields minimal; expand later as needed.
+/**
+ * Centralized types shared between Worker routes and the Durable Object.
+ * Keep minimal but expressive; expand as feature needs grow.
+ */
 
-export type RunStatus = "queued" | "running" | "done" | "error";
+export type RunStatus = "queued" | "awaiting_role" | "running" | "done" | "error";
+export type JobDescSource = "user_pasted" | "llm_generated";
+
+export interface RoleCandidate {
+  id: string;                   // stable id for selection
+  title: string;                // e.g., "Data Analyst"
+  level?: string;               // e.g., "IC2", "Senior"
+  rationale: string;            // <= 40 words: why this fits
+  confidence: number;           // 0..1
+  aiJobDescription?: string;    // optional short JD (60–120 words)
+}
 
 export interface RunIndexItem {
   id: string;
@@ -14,27 +26,28 @@ export interface RunData {
   id: string;
   createdAt: string;
   updatedAt: string;
-  targetRole?: string;
   status: RunStatus;
+
+  background?: string;
+  targetRole?: string;
+
+  selectedRoleId?: string;
+  jobDescription?: string;
+  jobDescriptionSource?: JobDescSource;
+
   phases?: {
+    // A) Discovery
     normalize?: unknown;
-    requirements?: unknown;
+    roleDiscovery?: {
+      candidates: RoleCandidate[];
+      debugRaw?: string; // raw LLM output for debugging (optional)
+    };
+
+    // B) Tailoring
+    requirements?: { must_have: string[]; nice_to_have: string[] };
     mapping?: unknown;
-    bullets?: unknown;
-    scoring?: unknown;
-    draft?: unknown;
+    bullets?: string[];
+    scoring?: { skill: string; score: number; depth?: number }[];
+    draft?: string;
   };
-}
-
-export interface SkillScore {
-  skill: string;
-  score: number; // 0..100
-  depth?: number; // optional tree depth
-}
-
-export interface Bullet {
-  id: string;
-  text: string;
-  role?: string;
-  tags?: string[];
 }

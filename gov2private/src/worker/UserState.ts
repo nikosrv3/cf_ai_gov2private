@@ -1,22 +1,18 @@
-// Durable Object focusing on per-user state: runs, bullet bank, skills.
-// Simplicity: key naming is flat; index array + per-run keys.
+// Durable Object focusing on per-user state: runs, role discovery, bullets/skills.
 
 import { DurableObject } from "cloudflare:workers";
-import type { RunData, RunIndexItem, SkillScore, Bullet, RunStatus } from "../types/run";
+import type { RunData, RunIndexItem, RoleCandidate, RunStatus } from "../types/run";
 
-const INDEX_KEY = "index"; // Array<RunIndexItem>
-const SKILLS_LATEST_KEY = "skills:latest"; // Array<SkillScore>
-const BULLET_BANK_KEY = "bullets:bank"; // Array<Bullet>
-const LATEST_RESUME_KEY = "resume:latest"; // string
+const INDEX_KEY = "index";        // Array<RunIndexItem>
 const MAX_RUNS = 20;
 
+// Durable Object: stores per-user runs and role-discovery/tailoring state.
 export class UserState extends DurableObject<Env> {
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-  }
+  // Constructor: initialize base DurableObject with ctx/env.
+  constructor(ctx: DurableObjectState, env: Env) { super(ctx, env); }
 
-  /** Create a new run shell and update the index (idempotent for same id). */
-  public async createRun(id: string, targetRole?: string): Promise<RunData> {
+  // createRun: create or upsert a new run shell and index entry.
+  public async createRun(id: string, init?: Partial<RunData>): Promise<RunData> {
     const now = new Date().toISOString();
     const key = runKey(id);
     const existing = (await this.ctx.storage.get<RunData>(key)) ?? null;
@@ -25,93 +21,113 @@ export class UserState extends DurableObject<Env> {
       id,
       createdAt: now,
       updatedAt: now,
-      targetRole,
       status: "queued",
-      phases: {}
+      phases: {},
     };
+    const merged = { ...run, ...init, updatedAt: now } satisfies RunData;
 
-    await this.ctx.storage.put(key, run);
-    await this.#upsertIndex({ id, createdAt: run.createdAt, targetRole, status: run.status });
-    return run;
+    await this.ctx.storage.put(key, merged);
+    await this.#upsertIndex({
+      id,
+      createdAt: merged.createdAt,
+      status: merged.status,
+      targetRole: merged.targetRole
+    });
+    return merged;
   }
 
-  /** Patch any part of a run (status, phases.* fields, targetRole). */
+  // saveRunPart: patch run fields/phases and keep index in sync.
   public async saveRunPart(id: string, patch: Partial<RunData>): Promise<RunData> {
     const key = runKey(id);
-    const existing = (await this.ctx.storage.get<RunData>(key)) ?? null;
     const now = new Date().toISOString();
+    const existing = (await this.ctx.storage.get<RunData>(key)) ?? null;
 
     const updated: RunData = {
       id,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
-      targetRole: patch.targetRole ?? existing?.targetRole,
       status: (patch.status ?? existing?.status ?? "running") as RunStatus,
-      phases: deepMerge(existing?.phases ?? {}, (patch as RunData).phases ?? {})
+      background: patch.background ?? existing?.background,
+      targetRole: patch.targetRole ?? existing?.targetRole,
+      selectedRoleId: patch.selectedRoleId ?? existing?.selectedRoleId,
+      jobDescription: patch.jobDescription ?? existing?.jobDescription,
+      jobDescriptionSource: patch.jobDescriptionSource ?? existing?.jobDescriptionSource,
+      phases: deepMerge(existing?.phases ?? {}, patch.phases ?? {})
     };
 
     await this.ctx.storage.put(key, updated);
-    await this.#upsertIndex({ id, createdAt: updated.createdAt, targetRole: updated.targetRole, status: updated.status });
+    await this.#upsertIndex({
+      id,
+      createdAt: updated.createdAt,
+      status: updated.status,
+      targetRole: updated.targetRole
+    });
     return updated;
   }
 
+  // getRun: fetch a single run by id or null if not found.
   public async getRun(id: string): Promise<RunData | null> {
     return (await this.ctx.storage.get<RunData>(runKey(id))) ?? null;
   }
 
+  // getHistory: return the most recent N runs (index).
   public async getHistory(limit = MAX_RUNS): Promise<RunIndexItem[]> {
     const idx = (await this.ctx.storage.get<RunIndexItem[]>(INDEX_KEY)) ?? [];
     return idx.slice(0, limit);
   }
 
-  public async setLatestResume(text: string): Promise<void> {
-    await this.ctx.storage.put(LATEST_RESUME_KEY, text);
+  // setRoleCandidates: store role candidates and mark run as awaiting selection.
+  public async setRoleCandidates(id: string, candidates: RoleCandidate[]): Promise<void> {
+    const run = await this.getRunOrThrow(id);
+    run.phases ??= {};
+    run.phases.roleDiscovery = { candidates };
+    run.status = "awaiting_role";
+    run.updatedAt = new Date().toISOString();
+    await this.ctx.storage.put(runKey(id), run);
+    await this.#upsertIndex({ id: run.id, createdAt: run.createdAt, status: run.status, targetRole: run.targetRole });
   }
 
-  public async upsertBullets(bullets: Bullet[]): Promise<Bullet[]> {
-    const existing = (await this.ctx.storage.get<Bullet[]>(BULLET_BANK_KEY)) ?? [];
-    // naive upsert by id
-    const byId = new Map(existing.map(b => [b.id, b]));
-    for (const b of bullets) byId.set(b.id, { ...byId.get(b.id), ...b });
-    const next = Array.from(byId.values());
-    await this.ctx.storage.put(BULLET_BANK_KEY, next);
-    return next;
+  // setSelectedRole: record the chosen role and optional JD, resume processing.
+  public async setSelectedRole(id: string, roleId: string, opts: { jobDescription?: string; source?: "user_pasted" | "llm_generated" }): Promise<RunData> {
+    const run = await this.getRunOrThrow(id);
+    run.selectedRoleId = roleId;
+    if (opts.jobDescription) {
+      run.jobDescription = opts.jobDescription;
+      run.jobDescriptionSource = opts.source ?? "user_pasted";
+    }
+    run.status = "running";
+    run.updatedAt = new Date().toISOString();
+    await this.ctx.storage.put(runKey(id), run);
+    await this.#upsertIndex({ id: run.id, createdAt: run.createdAt, status: run.status, targetRole: run.targetRole });
+    return run;
   }
 
-  public async getSkillMap(): Promise<SkillScore[]> {
-    return (await this.ctx.storage.get<SkillScore[]>(SKILLS_LATEST_KEY)) ?? [];
+  // getRunOrThrow: helper to fetch a run or throw if missing.
+  private async getRunOrThrow(id: string): Promise<RunData> {
+    const run = await this.getRun(id);
+    if (!run) throw new Error(`Run not found: ${id}`);
+    return run;
   }
 
-  public async setSkillMap(scores: SkillScore[]): Promise<void> {
-    await this.ctx.storage.put(SKILLS_LATEST_KEY, scores);
-  }
-
-  // ---- helpers ----
-
+  // #upsertIndex: insert/update the run index and enforce max size.
   async #upsertIndex(item: RunIndexItem): Promise<void> {
     let idx = (await this.ctx.storage.get<RunIndexItem[]>(INDEX_KEY)) ?? [];
     const i = idx.findIndex(r => r.id === item.id);
-    if (i === -1) idx.unshift(item);
-    else idx[i] = { ...idx[i], ...item };
-
+    if (i === -1) idx.unshift(item); else idx[i] = { ...idx[i], ...item };
     if (idx.length > MAX_RUNS) idx = idx.slice(0, MAX_RUNS);
     await this.ctx.storage.put(INDEX_KEY, idx);
   }
 }
 
-function runKey(id: string) {
-  return `run:${id}`;
-}
+// runKey: generate the storage key for a run id.
+function runKey(id: string) { return `run:${id}`; }
 
+// deepMerge: shallow/deep merge helper for simple nested objects.
 function deepMerge<T extends object>(a: T, b: Partial<T>): T {
-  // simple deep merge for plain objects (phases)
   const out: any = { ...a };
   for (const [k, v] of Object.entries(b ?? {})) {
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      out[k] = deepMerge((a as any)[k] ?? {}, v as any);
-    } else {
-      out[k] = v;
-    }
+    if (v && typeof v === "object" && !Array.isArray(v)) out[k] = deepMerge((a as any)[k] ?? {}, v as any);
+    else out[k] = v;
   }
   return out;
 }

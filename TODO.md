@@ -1,78 +1,68 @@
-# cf_ai_gov2private
+# cf_ai_gov2private – MVP TODO
 
-## TODO MVP
 
 ## Day 1 – Project & Platform Foundations
 
 - [x] **Repo & Frontend scaffold**
   - [x] Create repo `cf_ai_gov2private`
-  - [x] Clone react-vite-hono template from CloudFlare
-  - [x] Test basic hono usage
+  - [x] Clone React–Vite–Hono template from Cloudflare
+  - [x] Test basic Hono usage
 
 - [ ] **Anonymous identity cookie**
-  - [ ] Generate signed `uid` cookie (use Web Crypto for HMAC) and attach per request
-  - [ ] Workers Web Crypto API  
-        ↪ https://developers.cloudflare.com/workers/runtime-apis/web-crypto/  <!-- :contentReference[oaicite:3]{index=3} -->
-  - [ ] Cookie parse/set examples  
-        ↪ https://developers.cloudflare.com/workers/examples/extract-cookie-value/  <!-- :contentReference[oaicite:4]{index=4} -->
-  - [ ] (If caching around cookies) Set-Cookie behavior ref  
-        ↪ https://developers.cloudflare.com/cache/concepts/cache-behavior/  <!-- :contentReference[oaicite:5]{index=5} -->
+  - [ ] Generate signed `uid` cookie with Web Crypto (HMAC)
+  - [ ] Attach cookie per request
+  - [ ] Reference: [Web Crypto API](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)
 
-- [ ] **Durable Object: `UserState`**
-  - [ ] Define class with storage schema: runs[], bulletBank, skillScores, lastResume
-  - [ ] Methods: `saveRun`, `getHistory`, `getRun`, `getSkillMap`, `upsertBulletBank`
-  - [ ] Bind DO in wrangler config and route `env.USER_STATE.idFromName(uid)`
-  - [ ] Docs: Durable Objects overview & storage options  
-        ↪ https://developers.cloudflare.com/durable-objects/  <!-- :contentReference[oaicite:6]{index=6} -->  
-        ↪ https://developers.cloudflare.com/workers/platform/storage-options/  <!-- :contentReference[oaicite:7]{index=7} -->
+- [x] **Durable Object: `UserState`**
+  - [x] Define class with storage schema (runs[], bulletBank, skillScores, lastResume)
+  - [x] Methods: `createRun`, `saveRunPart`, `getRun`, `getHistory`, `setRoleCandidates`, `setSelectedRole`
+  - [x] Bind DO in wrangler config + migrations
+  - [x] Verified persistence with counter + run tests
 
 - [ ] **Design doc & endpoint spec**
-  - [ ] `docs/DESIGN.md`: sequence from UI → `/api/ingest` → Workflow → DO
-  - [ ] API: `/api/ingest`, `/api/history`, `/api/run/:id`, `/api/skills/map`
+  - [ ] Create `docs/DESIGN.md`: sequence from UI → Worker → Workflow → DO
+  - [ ] Document API routes:  
+        `/api/discover-jobs`, `/api/run/:id/roles`, `/api/run/:id/select-role`, `/api/run/:id`, `/api/history`, `/api/skills/map`
 
-- [ ] **Local run**
-  - [ ] `npx wrangler dev` and verify `/api/hello`
+- [x] **Local run**
+  - [x] `npx wrangler dev --persist-to .wrangler/state`  
+  - [x] Verified endpoints respond correctly
 
 ---
 
 ## Day 2 – Workflows + Workers AI + API
 
 - [x] **Workers AI binding & smoke test**
-  - [x] Add AI binding in wrangler config (`ai` or `AI` binding)
-  - [x] Test call to Llama 3.3 in a dummy route
-  - [x] Docs: Workers AI bindings + quickstart  
-        ↪ https://developers.cloudflare.com/workers-ai/configuration/bindings/  <!-- :contentReference[oaicite:8]{index=8} -->  
-        ↪ https://developers.cloudflare.com/workers-ai/get-started/workers-wrangler/  <!-- :contentReference[oaicite:9]{index=9} -->
-  - [x] Model catalog / Llama 3.3 pages  
-        ↪ https://developers.cloudflare.com/workers-ai/models/  <!-- :contentReference[oaicite:10]{index=10} -->  
-        ↪ https://developers.cloudflare.com/workers-ai/models/llama-3.3-70b-instruct-fp8-fast/  <!-- :contentReference[oaicite:11]{index=11} -->
-  - [x] (Optional) Try the AI Playground  
-        ↪ https://playground.ai.cloudflare.com/  <!-- :contentReference[oaicite:12]{index=12} -->
+  - [x] Add AI binding in wrangler config
+  - [x] Test call to Llama 3.x in a dummy route
+  - [x] Verified response from `/api/ai-test`
 
 - [ ] **Define `resume_transform` Workflow**
-  - [ ] Steps:
-        1) Normalize + structure resume → JSON  
-        2) Extract role key requirements  
-        3) Map transferable skills  
-        4) Rewrite bullets per role  
-        5) Score skill trees  
-        6) Assemble resume drafts
-  - [ ] Each step = deterministic input/output schema; persist intermediate results to DO
-  - [ ] Docs: Workflows overview & learning path  
-        ↪ https://developers.cloudflare.com/workflows/  <!-- :contentReference[oaicite:13]{index=13} -->  
-        ↪ https://developers.cloudflare.com/learning-paths/workflows-course/series/workflows-1/  <!-- :contentReference[oaicite:14]{index=14} -->
+  - [ ] Split into phases:  
+        1. Normalize resume → JSON  
+        2. Propose candidate roles (with rationale, confidence)  
+        3. Generate short JD for each role  
+        4. Await role selection  
+        5. Extract requirements from JD  
+        6. Map transferable skills  
+        7. Rewrite bullets per role  
+        8. Score skill tree  
+        9. Assemble draft resume
+  - [ ] Persist intermediate results to DO
+  - [ ] Reference: [Workflows docs](https://developers.cloudflare.com/workflows/)
 
 - [ ] **Wire Worker ⇄ Workflow ⇄ DO**
-  - [ ] `/api/ingest`: enqueue/launch workflow with `{ uid, resumeText, targetRole }`
-  - [ ] On each step completion: update DO (`saveRun` partial updates)
-  - [ ] `/api/history`, `/api/run/:id`, `/api/skills/map`: read from DO
+  - [ ] Replace inline AI helpers with Workflow steps
+  - [ ] Use callbacks or state updates into DO
+  - [ ] `/api/discover-jobs` should launch Workflow (Phase A)
+  - [ ] `/api/run/:id/select-role` should launch Workflow (Phase B)
 
-- [ ] **Prompt & schema files**
-  - [ ] Create `prompts/` with step prompts (JSON schema in comments)
-  - [ ] Create `types/workflow.ts` with Zod or TS types for step I/O
+- [ ] **Prompts & schema files**
+  - [ ] Extract step prompts into `prompts/`
+  - [ ] Create `types/workflow.ts` with input/output types
 
 - [ ] **Error handling & retries**
-  - [ ] Use Workflows retries/backoff for flaky AI calls
+  - [ ] Add retry/backoff for flaky AI JSON
   - [ ] Log step timings and token usage to DO
 
 ---
@@ -81,39 +71,31 @@
 
 - [ ] **SPA layout**
   - [ ] Sidebar: past runs (from `/api/history`)
-  - [ ] Main tabs:
-        - [ ] **Draft Resume** (assembled text, export .md/.txt)
-        - [ ] **Bullet Bank** (copy, multi-select export)
-        - [ ] **Skills Map** (tree with scores; simple list first)
-  - [ ] Hono fetch helpers in `/lib/api.ts`
+  - [ ] Tabs:  
+        - Draft Resume (assembled text)  
+        - Bullet Bank (copy/export)  
+        - Skills Map (tree/list view)
 
 - [ ] **Ingestion form**
-  - [ ] Paste resume textarea + role selector
-  - [ ] POST `/api/ingest` → show “processing” state (poll `/api/run/:id`)
-  - [ ] Graceful empty/error states
+  - [ ] Textarea for resume + background info
+  - [ ] POST `/api/discover-jobs`
+  - [ ] Show “processing” state, poll `/api/run/:id`
+  - [ ] Handle empty/error states gracefully
 
 - [ ] **Run details**
-  - [ ] Clicking a run loads data into tabs via `/api/run/:id`
+  - [ ] Clicking a run loads run data into tabs
 
 - [ ] **Finalize & docs**
-  - [ ] `README.md`: run/dev/deploy notes; cost notes for AI usage
+  - [ ] Update `README.md` with dev/deploy notes + cost notes
   - [ ] Add architecture diagram (optional)
 
 ---
 
-## Reference Links (at a glance)
+## Reference Links
 
-- Workers AI – models & bindings  
-  ↪ https://developers.cloudflare.com/workers-ai/models/  <!-- :contentReference[oaicite:15]{index=15} -->  
-  ↪ https://developers.cloudflare.com/workers-ai/configuration/bindings/  <!-- :contentReference[oaicite:16]{index=16} -->
-- Workflows – docs & course  
-  ↪ https://developers.cloudflare.com/workflows/  <!-- :contentReference[oaicite:17]{index=17} -->  
-  ↪ https://developers.cloudflare.com/learning-paths/workflows-course/series/workflows-1/  <!-- :contentReference[oaicite:18]{index=18} -->
-- Durable Objects  
-  ↪ https://developers.cloudflare.com/durable-objects/  <!-- :contentReference[oaicite:19]{index=19} -->
-- Hono on Workers  
-  ↪ https://hono.dev/docs/getting-started/cloudflare-workers  <!-- :contentReference[oaicite:20]{index=20} -->
-- Wrangler configuration  
-  ↪ https://developers.cloudflare.com/workers/wrangler/configuration/  <!-- :contentReference[oaicite:21]{index=21} -->
-- Web Crypto (for cookie signing)  
-  ↪ https://developers.cloudflare.com/workers/runtime-apis/web-crypto/  <!-- :contentReference[oaicite:22]{index=22} -->
+- [Workers AI – models & bindings](https://developers.cloudflare.com/workers-ai/models/)
+- [Workflows – overview & course](https://developers.cloudflare.com/workflows/)
+- [Durable Objects](https://developers.cloudflare.com/durable-objects/)
+- [Hono on Workers](https://hono.dev/docs/getting-started/cloudflare-workers)
+- [Wrangler configuration](https://developers.cloudflare.com/workers/wrangler/configuration/)
+- [Web Crypto API (cookie signing)](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)

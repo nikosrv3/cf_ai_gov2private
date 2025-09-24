@@ -16,6 +16,9 @@
 	"ai": {
 		"binding": "AI"
 	},
+	"migrations": [
+		{ "tag": "v1", "new_classes": ["UserState"]}
+	],
 	"upload_source_maps": true,
 	"assets": {
 		"directory": "./dist/client",

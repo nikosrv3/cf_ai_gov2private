@@ -1,45 +1,53 @@
 // Hono Worker entry: role discovery + selection + tailoring demo routes.
+// Uses env.MODEL (wrangler.json "vars") for all AI calls.
 
 import { Hono } from "hono";
 import { UserState } from "./UserState";
 import type { RoleCandidate, RunData } from "../types/run";
 
+/* -------------------- Bindings -------------------- */
 type Env = {
-  AI: any;
-  USER_STATE: DurableObjectNamespace<UserState>;
+  AI: any;                                         // Workers AI binding
+  USER_STATE: DurableObjectNamespace<UserState>;   // Durable Object namespace
+  MODEL: string;                                   // e.g., "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 };
 
 const app = new Hono<{ Bindings: Env }>();
 
+/* -------------------- Health -------------------- */
 // /api/health: quick readiness probe.
 app.get("/api/health", (c) => c.text("ok"));
 
+/* -------------------- Role Discovery -------------------- */
 /**
- * /api/discover-jobs: run role discovery (normalize → propose roles → short JDs),
- * persist candidates to DO, and return a run ready for selection.
+ * /api/discover-jobs
+ * - Normalize resume (demo stub)
+ * - Propose roles (LLM) and generate short JDs per role
+ * - Persist to Durable Object
  */
 app.post("/api/discover-jobs", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     background?: string; resumeText?: string; runId?: string;
   };
 
-  const uid = "demo-user";
+  const uid = "demo-user"; // TODO: replace with signed uid cookie
   const stub = c.env.USER_STATE.getByName(uid);
 
   const runId = body.runId ?? randomId();
   await stub.createRun(runId, { background: body.background, status: "queued" });
 
   const resumeJson = await normalizeResume(body.resumeText ?? "");
-  const { candidates, raw } = await proposeRoles(c.env.AI, body.background ?? "", resumeJson);
+
+  // Propose roles (safe JSON, centralized model)
+  const { candidates, raw } = await proposeRoles(c.env.AI, c.env.MODEL, body.background ?? "", resumeJson);
   await stub.saveRunPart(runId, { phases: { roleDiscovery: { candidates, debugRaw: raw } } });
 
-//   const { candidates } = await proposeRoles(c.env.AI, body.background ?? "", resumeJson);
-
+  // Enrich roles with short AI JDs (best-effort)
   const enriched: RoleCandidate[] = [];
-    for (const r of candidates) {
-    const jd = await generateShortJD(c.env.AI, r.title).catch(() => undefined);
+  for (const r of candidates) {
+    const jd = await generateShortJD(c.env.AI, c.env.MODEL, r.title).catch(() => undefined);
     enriched.push({ ...r, aiJobDescription: jd });
-    }
+  }
 
   await stub.setRoleCandidates(runId, enriched);
 
@@ -47,15 +55,15 @@ app.post("/api/discover-jobs", async (c) => {
   return c.json({ ok: true, run });
 });
 
+/* -------------------- Read endpoints -------------------- */
 app.get("/api/run/:id", async (c) => {
   const runId = c.req.param("id");
-  const stub = c.env.USER_STATE.getByName("demo-user"); // TODO: replace with signed uid cookie
+  const stub = c.env.USER_STATE.getByName("demo-user");
   const run = await stub.getRun(runId);
   if (!run) return c.json({ ok: false, error: "not_found" }, 404);
   return c.json({ ok: true, run });
 });
 
-// /api/history: list recent runs (ids + status)
 app.get("/api/history", async (c) => {
   const stub = c.env.USER_STATE.getByName("demo-user");
   const items = await stub.getHistory(20);
@@ -63,7 +71,7 @@ app.get("/api/history", async (c) => {
 });
 
 /**
- * /api/run/:id/roles: fetch the current candidate roles for a run.
+ * /api/run/:id/roles: fetch current role candidates for a run.
  */
 app.get("/api/run/:id/roles", async (c) => {
   const stub = c.env.USER_STATE.getByName("demo-user");
@@ -74,7 +82,7 @@ app.get("/api/run/:id/roles", async (c) => {
 });
 
 /**
- * /api/run/:id/select-role: store the selected role/JD and run tailoring steps.
+ * /api/run/:id/select-role: store selected role/JD and run tailoring steps.
  */
 app.post("/api/run/:id/select-role", async (c) => {
   const runId = c.req.param("id");
@@ -100,37 +108,40 @@ app.post("/api/run/:id/select-role", async (c) => {
 
   await stub.setSelectedRole(runId, chosen.id, { jobDescription: jd, source });
 
-  const requirements = await extractRequirements(c.env.AI, chosen.title, jd);
+  const requirements = await extractRequirements(c.env.AI, c.env.MODEL, chosen.title, jd);
   await stub.saveRunPart(runId, { phases: { requirements } });
 
   const mapping = await mapTransferable(run.phases?.normalize ?? {}, requirements);
   await stub.saveRunPart(runId, { phases: { mapping } });
 
-  const bullets = await rewriteBullets(c.env.AI, mapping, chosen.title);
+  const bullets = await rewriteBullets(c.env.AI, c.env.MODEL, mapping, chosen.title);
   await stub.saveRunPart(runId, { phases: { bullets } });
 
   const scoring = await scoreSkills(mapping);
   await stub.saveRunPart(runId, { phases: { scoring } });
 
-  const draft = await assembleDraft(c.env, { bullets, requirements, mapping, background: run.background, title: chosen.title });
+  const draft = await assembleDraft(c.env.AI, c.env.MODEL, {
+    bullets, requirements, mapping, background: run.background, title: chosen.title
+  });
   await stub.saveRunPart(runId, { phases: { draft }, status: "done", targetRole: chosen.title });
 
   const finalRun = (await stub.getRun(runId)) as RunData | null;
   return c.json({ ok: true, run: finalRun });
 });
 
-// /api/ai-test: quick model smoke test route.
+/* -------------------- AI smoke test -------------------- */
 app.get("/api/ai-test", async (c) => {
-  const model ='@cf/meta/llama-3.1-8b-instruct';
+  const model = c.env.MODEL || '@cf/meta/llama-3.1-8b-instruct';
   const messages = [
     { role: 'system', content: 'You are a philosopher, that only responds in two sentence riddles.' },
     { role: 'user', content: 'What is this application?' }
   ];
   try {
     const resp = await c.env.AI.run(model, { messages });
-    const text = resp?.response ?? resp?.output_text ?? String(resp ?? '');
+    const text = normalizeAiString(resp);
     return c.json({ ok: true, model, text });
-  } catch {
+  } catch (e: any) {
+    console.error("[/api/ai-test] error:", e?.message || e);
     return c.json({ ok: false, error: 'issue with model' }, 500);
   }
 });
@@ -138,8 +149,7 @@ app.get("/api/ai-test", async (c) => {
 export default app;
 export { UserState };
 
-/* -------------------- Step Helpers (one-liners above each) -------------------- */
-// assertAI: ensure the Workers AI binding is present and callable.
+/* -------------------- Step Helpers -------------------- */
 function assertAI(ai: Env["AI"]) {
   if (!ai || typeof (ai as any).run !== "function") {
     throw new Error(
@@ -148,51 +158,61 @@ function assertAI(ai: Env["AI"]) {
   }
 }
 
-// randomId: generate a compact hex id.
 function randomId(): string {
   const b = new Uint8Array(8);
   crypto.getRandomValues(b);
   return Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
 }
 
-// normalizeResume: convert raw resume text into a minimal JSON structure (demo).
 async function normalizeResume(resumeText: string): Promise<unknown> {
   if (!resumeText) return { jobs: [], skills: [], education: [] };
   return { jobs: [{ text: resumeText }], skills: [], education: [] };
 }
 
-// proposeRoles: ask the LLM for role candidates; returns normalized list.
-// async function proposeRoles(ai: Env["AI"], background: string, resumeJson: unknown): Promise<RoleCandidate[]> {
-//   assertAI(ai);
-//   const sys = `You propose realistic next-step private-sector roles for a person coming from government work.
-// Return 6-10 candidates with {id,title,level?,rationale,confidence}.
-// Respond as strict JSON: {"candidates":[...]} with confidence in 0..1 and concise rationales (<=40 words).`;
-//   const usr = `BACKGROUND:
-// ${background}
+/** Safe string extraction from Workers AI responses */
+function normalizeAiString(resp: any): string {
+  const rawAny = resp?.response ?? resp?.output_text ?? resp?.result ?? resp;
+  if (typeof rawAny === "string") return rawAny.trim();
+  try { return JSON.stringify(rawAny ?? ""); } catch { return ""; }
+}
 
-// RESUME_JSON:
-// ${JSON.stringify(resumeJson).slice(0, 4000)}`;
+/** Strip Markdown fences if the model wrapped JSON in ```json ... ``` */
+function stripFences(s: string) { return s.replace(/```json|```/g, "").trim(); }
 
-//   const r = await ai.run("@cf/meta/llama-3.1-8b-instruct", { messages: [
-//     { role: "system", content: sys },
-//     { role: "user",  content: usr }
-//   ]});
+/** Parse JSON with guard */
+function tryParseJson(s: string): any {
+  try { return JSON.parse(stripFences(s)); } catch { return null; }
+}
 
-//   const txt = r?.response ?? r?.output_text ?? "{}";
-//   let parsed: any;
-//   try { parsed = JSON.parse(safeJson(txt)); } catch { parsed = { candidates: [] }; }
+/** Best-effort JSON parse with one retry using a system hint */
+async function aiJsonWithRetry(ai: Env["AI"], model: string, messages: any[], parseHint?: string): Promise<{text: string, json: any}> {
+  const t0 = Date.now();
+  let resp = await ai.run(model, { messages });
+  let text = normalizeAiString(resp);
+  let json = tryParseJson(text);
 
-//   return (parsed.candidates ?? []).slice(0, 10).map((c: any, i: number) => ({
-//     id: c?.id ?? `role-${i + 1}`,
-//     title: String(c?.title ?? "").slice(0, 80),
-//     level: c?.level ? String(c.level).slice(0, 20) : undefined,
-//     rationale: String(c?.rationale ?? "").slice(0, 240),
-//     confidence: Math.max(0, Math.min(1, Number(c?.confidence ?? 0.6))),
-//   }));
-// }
+  if (!json && parseHint) {
+    // Retry with a stricter system nudge
+    const retryMsgs = [
+      messages[0],
+      { role: "system", content: parseHint },
+      ...messages.slice(1),
+    ];
+    resp = await ai.run(model, { messages: retryMsgs });
+    text = normalizeAiString(resp);
+    json = tryParseJson(text);
+  }
 
-async function proposeRoles(ai: Env["AI"], background: string, resumeJson: unknown): Promise<{ candidates: RoleCandidate[]; raw: string }> {
+  console.log("[aiJsonWithRetry] ms=", Date.now() - t0, "len=", text.length);
+  return { text, json };
+}
+
+/* -------------------- AI Steps -------------------- */
+
+async function proposeRoles(ai: Env["AI"], model: string, background: string, resumeJson: unknown):
+  Promise<{ candidates: RoleCandidate[]; raw: string }> {
   assertAI(ai);
+
   const sys = `You propose realistic next-step private-sector roles for a person coming from government work.
 Only output JSON: {"candidates":[{id,title,level?,rationale,confidence}]} with confidence 0..1 and rationale <= 40 words.`;
   const usr = `BACKGROUND:
@@ -201,28 +221,27 @@ ${background}
 RESUME_JSON:
 ${JSON.stringify(resumeJson).slice(0, 4000)}`;
 
-  const t0 = Date.now();
-  const r = await ai.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages: [
+  const parseHint = `IF your last response was not strict JSON, now respond ONLY strict JSON matching:
+{"candidates":[{"id":"string","title":"string","level?":"string","rationale":"string","confidence":0.0}]}
+No prose.`;
+
+  const { text, json } = await aiJsonWithRetry(ai, model, [
     { role: "system", content: sys },
     { role: "user",  content: usr }
-  ]});
-  const raw = (r?.response ?? r?.output_text ?? "").trim();
-  console.log("[proposeRoles] raw len:", raw.length, "timeMs:", Date.now() - t0);
+  ], parseHint);
 
-  let parsed: any;
-  try { parsed = JSON.parse(raw.replace(/```json|```/g, "").trim()); }
-  catch { parsed = { candidates: [] }; }
+  let out: RoleCandidate[] = [];
+  const parsed = json || {};
+  if (Array.isArray(parsed?.candidates)) {
+    out = parsed.candidates.slice(0, 10).map((c: any, i: number) => ({
+      id: c?.id ?? `role-${i + 1}`,
+      title: String(c?.title ?? "").slice(0, 80),
+      level: c?.level ? String(c.level).slice(0, 20) : undefined,
+      rationale: String(c?.rationale ?? "").slice(0, 240),
+      confidence: Math.max(0, Math.min(1, Number(c?.confidence ?? 0.6))),
+    }));
+  }
 
-  let out: RoleCandidate[] = (parsed.candidates ?? []).slice(0, 10).map((c: any, i: number) => ({
-    id: c?.id ?? `role-${i + 1}`,
-    title: String(c?.title ?? "").slice(0, 80),
-    level: c?.level ? String(c.level).slice(0, 20) : undefined,
-    rationale: String(c?.rationale ?? "").slice(0, 240),
-    confidence: Math.max(0, Math.min(1, Number(c?.confidence ?? 0.6))),
-  }));
-  console.log("[proposeRoles] parsed candidates:", out.length);
-
-  // Fallback if empty
   if (out.length === 0) {
     console.warn("[proposeRoles] empty list -> fallback candidates used");
     out = [
@@ -231,23 +250,25 @@ ${JSON.stringify(resumeJson).slice(0, 4000)}`;
       { id: "fallback-3", title: "Data Engineer", rationale: "ETL/data pipeline experience.", confidence: 0.55 },
     ];
   }
-  return { candidates: out, raw };
+
+  return { candidates: out, raw: text };
 }
 
-// generateShortJD: produce a concise 60–120 word AI job description for a role.
-async function generateShortJD(ai: Env["AI"], title: string): Promise<string> {
+// concise AI JD
+async function generateShortJD(ai: Env["AI"], model: string, title: string): Promise<string> {
   assertAI(ai);
   const sys = `Write a concise job description (60-120 words) for the given role. No preamble, plain text.`;
   const usr = `ROLE TITLE: ${title}`;
-  const r = await ai.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages: [
+  const r = await ai.run(model, { messages: [
     { role: "system", content: sys },
     { role: "user",  content: usr }
   ]});
-  return (r?.response ?? r?.output_text ?? "").trim();
+  return normalizeAiString(r);
 }
 
-// extractRequirements: parse a JD into must-have / nice-to-have arrays.
-async function extractRequirements(ai: Env["AI"], title: string, jd: string): Promise<{ must_have: string[]; nice_to_have: string[] }> {
+// requirements extraction
+async function extractRequirements(ai: Env["AI"], model: string, title: string, jd: string):
+  Promise<{ must_have: string[]; nice_to_have: string[] }> {
   assertAI(ai);
   const sys = `Extract requirements {must_have[], nice_to_have[]} from the job description.
 Return strict JSON with concise skill/tech phrases.`;
@@ -255,17 +276,19 @@ Return strict JSON with concise skill/tech phrases.`;
 
 JOB DESCRIPTION:
 ${jd}`;
-  const r = await ai.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages: [
+
+  const { text, json } = await aiJsonWithRetry(ai, model, [
     { role: "system", content: sys },
     { role: "user",  content: usr }
-  ]});
-  try { return JSON.parse(safeJson(r?.response ?? r?.output_text ?? "{}")); }
-  catch { return { must_have: [], nice_to_have: [] }; }
+  ], `If prior response wasn't valid JSON, now output ONLY strict JSON {"must_have":[],"nice_to_have":[]}.`);
+
+  if (json && Array.isArray(json.must_have) && Array.isArray(json.nice_to_have)) return json;
+  console.warn("[extractRequirements] bad JSON, returning empty lists. Raw:", (text || "").slice(0, 160));
+  return { must_have: [], nice_to_have: [] };
 }
 
-// mapTransferable: create requirement-to-evidence mappings from resume JSON (demo).
+// simple demo mapping
 async function mapTransferable(_resumeJson: unknown, reqs: { must_have: string[]; nice_to_have: string[] }): Promise<unknown> {
-  // demo mapping – no AI needed here; underscore removed to avoid unused warnings
   return {
     mapping: (reqs.must_have ?? []).map((m: string) => ({
       requirement: m,
@@ -275,18 +298,18 @@ async function mapTransferable(_resumeJson: unknown, reqs: { must_have: string[]
   };
 }
 
-// rewriteBullets: rewrite tailored resume bullets using the mapping context.
-async function rewriteBullets(ai: Env["AI"], mapping: unknown, title: string): Promise<string[]> {
+// bullet rewriting
+async function rewriteBullets(ai: Env["AI"], model: string, mapping: unknown, title: string): Promise<string[]> {
   assertAI(ai);
   const sys = `Rewrite resume bullets tailored to the role. 3-6 bullets. Strong verbs, quantification, industry phrasing. Return each bullet as a line prefixed with "- ".`;
   const usr = `ROLE: ${title}
 MAPPING:
 ${JSON.stringify(mapping).slice(0, 4000)}`;
-  const r = await ai.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages: [
+  const r = await ai.run(model, { messages: [
     { role: "system", content: sys },
     { role: "user",  content: usr }
   ]});
-  const text = (r?.response ?? r?.output_text ?? "").trim();
+  const text = normalizeAiString(r);
   return String(text)
     .split(/\r?\n/)
     .map((s: string) => s.replace(/^\s*-\s*/, "").trim())
@@ -294,14 +317,13 @@ ${JSON.stringify(mapping).slice(0, 4000)}`;
     .slice(0, 8);
 }
 
-// scoreSkills: assign rough numeric scores to core skills (placeholder).
 async function scoreSkills(_mapping: unknown): Promise<{ skill: string; score: number }[]> {
-  // no AI needed here; keep simple placeholder scoring
   return [{ skill: "Data Analysis", score: 72 }, { skill: "SQL", score: 68 }];
 }
 
-// assembleDraft: build a plaintext resume from bullets/requirements/mapping.
-async function assembleDraft(ai: Env["AI"], input: { bullets: string[]; requirements: any; mapping: any; background?: string; title: string }): Promise<string> {
+async function assembleDraft(ai: Env["AI"], model: string, input: {
+  bullets: string[]; requirements: any; mapping: any; background?: string; title: string
+}): Promise<string> {
   assertAI(ai);
   const sys = `Assemble a role-tailored resume as plain text sections: Summary, Skills, Experience (use provided bullets), Education (placeholder).`;
   const usr = `TITLE: ${input.title}
@@ -310,12 +332,9 @@ BULLETS: ${JSON.stringify(input.bullets)}
 REQUIREMENTS: ${JSON.stringify(input.requirements)}
 MAPPING: ${JSON.stringify(input.mapping).slice(0, 2000)}
 `;
-  const r = await ai.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", { messages: [
+  const r = await ai.run(model, { messages: [
     { role: "system", content: sys },
     { role: "user",  content: usr }
   ]});
-  return (r?.response ?? r?.output_text ?? "").trim();
+  return normalizeAiString(r);
 }
-
-// safeJson: strip markdown fences from a JSON-ish string before parsing.
-function safeJson(s: string) { return s.replace(/```json|```/g, "").trim(); }

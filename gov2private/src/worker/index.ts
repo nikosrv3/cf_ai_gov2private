@@ -1,18 +1,45 @@
 // Hono Worker entry: role discovery + selection + tailoring demo routes.
 // Uses env.MODEL (wrangler.json "vars") for all AI calls.
+// Signed anonymous uid via APP_SECRET (HMAC) with cookie middleware.
 
 import { Hono } from "hono";
 import { UserState } from "./UserState";
 import type { RoleCandidate, RunData } from "../types/run";
+import { ensureUidFromCookieHeader } from "./cookies";
 
 /* -------------------- Bindings -------------------- */
 type Env = {
   AI: any;                                         // Workers AI binding
   USER_STATE: DurableObjectNamespace<UserState>;   // Durable Object namespace
   MODEL: string;                                   // e.g., "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+  APP_SECRET: string;                               // HMAC secret (wrangler secret)
 };
 
-const app = new Hono<{ Bindings: Env }>();
+// Note: include Variables typing so c.set("uid", ...) and c.get("uid") are type-safe.
+const app = new Hono<{ Bindings: Env; Variables: { uid: string } }>();
+
+/* -------------------- UID Cookie Middleware -------------------- */
+/**
+ * - Verifies or issues (uid, uid_sig) using HMAC(APP_SECRET).
+ * - Attaches uid to the context via c.set('uid', uid).
+ * - Appends Set-Cookie headers when issuing/refreshing.
+ */
+app.use("*", async (c, next) => {
+  const secret = c.env.APP_SECRET;
+  if (!secret) {
+    // Fail fast—misconfigured secret means no tenancy guarantees.
+    return c.json({ ok: false, error: "server_misconfigured: missing APP_SECRET" }, 500);
+  }
+
+  const cookieHeader = c.req.header("Cookie");
+  const { uid, setCookies } = await ensureUidFromCookieHeader(secret, cookieHeader);
+
+  // Append Set-Cookie(s) if needed
+  for (const sc of setCookies) c.header("Set-Cookie", sc, { append: true });
+
+  c.set("uid", uid);
+  await next();
+});
 
 /* -------------------- Health -------------------- */
 // /api/health: quick readiness probe.
@@ -30,7 +57,7 @@ app.post("/api/discover-jobs", async (c) => {
     background?: string; resumeText?: string; runId?: string;
   };
 
-  const uid = "demo-user"; // TODO: replace with signed uid cookie
+  const uid = c.get("uid");
   const stub = c.env.USER_STATE.getByName(uid);
 
   const runId = body.runId ?? randomId();
@@ -58,14 +85,16 @@ app.post("/api/discover-jobs", async (c) => {
 /* -------------------- Read endpoints -------------------- */
 app.get("/api/run/:id", async (c) => {
   const runId = c.req.param("id");
-  const stub = c.env.USER_STATE.getByName("demo-user");
+  const uid = c.get("uid");
+  const stub = c.env.USER_STATE.getByName(uid);
   const run = await stub.getRun(runId);
   if (!run) return c.json({ ok: false, error: "not_found" }, 404);
   return c.json({ ok: true, run });
 });
 
 app.get("/api/history", async (c) => {
-  const stub = c.env.USER_STATE.getByName("demo-user");
+  const uid = c.get("uid");
+  const stub = c.env.USER_STATE.getByName(uid);
   const items = await stub.getHistory(20);
   return c.json({ ok: true, items });
 });
@@ -74,7 +103,8 @@ app.get("/api/history", async (c) => {
  * /api/run/:id/roles: fetch current role candidates for a run.
  */
 app.get("/api/run/:id/roles", async (c) => {
-  const stub = c.env.USER_STATE.getByName("demo-user");
+  const uid = c.get("uid");
+  const stub = c.env.USER_STATE.getByName(uid);
   const run = (await stub.getRun(c.req.param("id"))) as RunData | null;
   if (!run) return c.json({ ok: false, error: "not_found" }, 404);
   const candidates = run.phases?.roleDiscovery?.candidates ?? [];
@@ -86,7 +116,8 @@ app.get("/api/run/:id/roles", async (c) => {
  */
 app.post("/api/run/:id/select-role", async (c) => {
   const runId = c.req.param("id");
-  const stub = c.env.USER_STATE.getByName("demo-user");
+  const uid = c.get("uid");
+  const stub = c.env.USER_STATE.getByName(uid);
 
   const body = (await c.req.json().catch(() => ({}))) as {
     roleId: string;
@@ -131,7 +162,7 @@ app.post("/api/run/:id/select-role", async (c) => {
 
 /* -------------------- AI smoke test -------------------- */
 app.get("/api/ai-test", async (c) => {
-  const model = c.env.MODEL || '@cf/meta/llama-3.1-8b-instruct';
+  const model = c.env.MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
   const messages = [
     { role: 'system', content: 'You are a philosopher, that only responds in two sentence riddles.' },
     { role: 'user', content: 'What is this application?' }
@@ -192,7 +223,6 @@ async function aiJsonWithRetry(ai: Env["AI"], model: string, messages: any[], pa
   let json = tryParseJson(text);
 
   if (!json && parseHint) {
-    // Retry with a stricter system nudge
     const retryMsgs = [
       messages[0],
       { role: "system", content: parseHint },

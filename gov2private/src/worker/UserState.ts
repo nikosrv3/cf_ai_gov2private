@@ -3,14 +3,17 @@
 import { DurableObject } from "cloudflare:workers";
 import type { RunData, RunIndexItem, RoleCandidate, RunStatus } from "../types/run";
 
-type Env = unknown; // No direct env access used inside; keep for DO signature.
+type Env = unknown; // DO doesn't use env directly here.
 
 const INDEX_KEY = "index";        // Array<RunIndexItem>
 const MAX_RUNS = 20;
 
+// Durable Object: stores per-user runs and role-discovery/tailoring state.
 export class UserState extends DurableObject<Env> {
+  // Constructor: initialize base DurableObject with ctx/env.
   constructor(ctx: DurableObjectState, env: Env) { super(ctx, env); }
 
+  // createRun: create or upsert a new run shell and index entry.
   public async createRun(id: string, init?: Partial<RunData>): Promise<RunData> {
     const now = new Date().toISOString();
     const key = runKey(id);
@@ -35,6 +38,7 @@ export class UserState extends DurableObject<Env> {
     return merged;
   }
 
+  // saveRunPart: patch run fields/phases and keep index in sync.
   public async saveRunPart(id: string, patch: Partial<RunData>): Promise<RunData> {
     const key = runKey(id);
     const now = new Date().toISOString();
@@ -63,15 +67,18 @@ export class UserState extends DurableObject<Env> {
     return updated;
   }
 
+  // getRun: fetch a single run by id or null if not found.
   public async getRun(id: string): Promise<RunData | null> {
     return (await this.ctx.storage.get<RunData>(runKey(id))) ?? null;
   }
 
+  // getHistory: return the most recent N runs (index).
   public async getHistory(limit = MAX_RUNS): Promise<RunIndexItem[]> {
     const idx = (await this.ctx.storage.get<RunIndexItem[]>(INDEX_KEY)) ?? [];
     return idx.slice(0, limit);
   }
 
+  // setRoleCandidates: store role candidates and mark run as awaiting selection.
   public async setRoleCandidates(id: string, candidates: RoleCandidate[]): Promise<void> {
     const run = await this.getRunOrThrow(id);
     run.phases ??= {};
@@ -82,6 +89,7 @@ export class UserState extends DurableObject<Env> {
     await this.#upsertIndex({ id: run.id, createdAt: run.createdAt, status: run.status, targetRole: run.targetRole });
   }
 
+  // setSelectedRole: record the chosen role and optional JD, resume processing.
   public async setSelectedRole(id: string, roleId: string, opts: { jobDescription?: string; source?: "user_pasted" | "llm_generated" }): Promise<RunData> {
     const run = await this.getRunOrThrow(id);
     run.selectedRoleId = roleId;
@@ -96,12 +104,14 @@ export class UserState extends DurableObject<Env> {
     return run;
   }
 
+  // getRunOrThrow: helper to fetch a run or throw if missing.
   private async getRunOrThrow(id: string): Promise<RunData> {
     const run = await this.getRun(id);
     if (!run) throw new Error(`Run not found: ${id}`);
     return run;
   }
 
+  // #upsertIndex: insert/update the run index and enforce max size.
   async #upsertIndex(item: RunIndexItem): Promise<void> {
     let idx = (await this.ctx.storage.get<RunIndexItem[]>(INDEX_KEY)) ?? [];
     const i = idx.findIndex(r => r.id === item.id);
@@ -111,8 +121,10 @@ export class UserState extends DurableObject<Env> {
   }
 }
 
+// runKey: generate the storage key for a run id.
 function runKey(id: string) { return `run:${id}`; }
 
+// deepMerge: shallow/deep merge helper for simple nested objects.
 function deepMerge<T extends object>(a: T, b: Partial<T>): T {
   const out: any = { ...a };
   for (const [k, v] of Object.entries(b ?? {})) {

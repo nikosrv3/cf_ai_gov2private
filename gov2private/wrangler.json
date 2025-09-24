@@ -16,7 +16,7 @@
     "binding": "AI"
   },
   "migrations": [
-    { "tag": "v1", "new_classes": ["UserState"] }
+    { "tag": "v1", "new_sqlite_classes": ["UserState"] }
   ],
   "upload_source_maps": true,
   "assets": {

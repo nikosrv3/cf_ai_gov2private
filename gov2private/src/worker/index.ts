@@ -654,6 +654,59 @@ function randomId(): string {
 }
 
 /**
+ * Skills-only fallback extraction when main normalize fails.
+ * Uses minimal prompt with strict size limits to ensure completion.
+ */
+async function extractSkillsOnly(
+  ai: Env["AI"],
+  model: string,
+  resumeText: string,
+  backgroundText?: string
+): Promise<string[]> {
+  const input = String(resumeText || "").slice(0, 8000); // Smaller input for fallback
+  const bg = String(backgroundText || "").slice(0, 2000);
+
+  const system = [
+    "Extract ONLY a skills array from the resume. Output JSON between BEGIN_SKILLS and END_SKILLS markers.",
+    "CRITICAL: Place your response EXACTLY between these markers:",
+    "BEGIN_SKILLS",
+    "[your JSON here]",
+    "END_SKILLS",
+    "",
+    "Schema: {\"skills\":[\"skill1\",\"skill2\",...]}",
+    "Rules:",
+    "- ALWAYS use BEGIN_SKILLS and END_SKILLS markers.",
+    "- NO text before BEGIN_SKILLS or after END_SKILLS.",
+    "- Extract 10-30 relevant skills maximum.",
+    "- Use lowercase, single terms or short phrases.",
+    "- Focus on technical skills, tools, languages, frameworks.",
+    "- Keep JSON compact to fit within output limits."
+  ].join("\n");
+
+  const user = [
+    "BACKGROUND:",
+    bg || "(none)",
+    "",
+    "RESUME:",
+    input
+  ].join("\n");
+
+  const { json, method } = await aiJsonWithRetry(ai, model, [
+    { role: "system", content: system },
+    { role: "user", content: user }
+  ], 'If your prior reply was not valid JSON, respond now with ONLY {"skills":["..."]} between BEGIN_SKILLS and END_SKILLS markers.');
+
+  if (json && Array.isArray(json.skills)) {
+    const skills = [...new Set(json.skills.map((s: any) => String(s).toLowerCase().trim()).filter(Boolean))].slice(0, 30);
+    console.log(`[extractSkillsOnly] SUCCESS via ${method}, extracted ${skills.length} skills`);
+    return skills;
+  }
+
+  console.log(`[extractSkillsOnly] FAILED via ${method}, returning empty array`);
+  return [];
+}
+
+/**
  * AI-backed resume/CV normalizer (de-identified few-shot).
  * Returns a superset for forward use AND a `jobs` mirror for back-compat.
  */
@@ -684,16 +737,26 @@ async function normalizeResume(
   }
 
   const system = [
-    "You extract resume/CV information into STRICT JSON. Output ONLY JSON (no prose, no markdown).",
+    "You extract resume/CV information into STRICT JSON. Output ONLY JSON between BEGIN_JSON and END_JSON markers.",
+    "CRITICAL: Place your JSON response EXACTLY between these markers:",
+    "BEGIN_JSON",
+    "[your JSON here]",
+    "END_JSON",
+    "",
     "Schema:",
     '{"name":"string|null","contact":{"email":"string|null","phone":"string|null","location":"string|null","links":["string"]},"education":[{"degree":"string","field":"string|null","institution":"string","year":"string|null"}],"skills":["string"],"experience":[{"title":"string","org":"string","location":"string|null","start":"string|null","end":"string|null","bullets":["string"],"skills":["string"]}]}',
+    "",
     "Rules:",
+    "- ALWAYS use BEGIN_JSON and END_JSON markers around your response.",
+    "- NO text before BEGIN_JSON or after END_JSON.",
     "- Always include all keys shown above.",
     "- Use concise bullets (<= 30 words each).",
     "- Normalize skills to lowercase single terms/short phrases; dedupe.",
     "- If data is missing, use null or empty arrays; do not invent data.",
     "- Prefer ISO-like ranges (e.g., '2019-06') or year-only; if unclear, return null.",
-    "- Contact links: include URLs (LinkedIn/portfolio) if present; else empty array."
+    "- Contact links: include URLs (LinkedIn/portfolio) if present; else empty array.",
+    "- RESPECT SIZE LIMITS: education ≤ 3 items; skills ≤ 40 items; experience ≤ 4 roles with ≤ 5 bullets each.",
+    "- Keep JSON compact to fit within output token limits."
   ].join("\n");
 
   // De-identified few-shot (no real names or orgs)
@@ -706,22 +769,26 @@ async function normalizeResume(
     "Skills: sql, data analysis, program evaluation, dashboards."
   ].join("\n");
 
-  const fewShotAssistant1 = JSON.stringify({
-    name: "Candidate Name",
-    contact: { email: null, phone: null, location: "Atlanta, GA", links: [] },
-    education: [
-      { degree: "Ph.D.", field: "Behavioral Science", institution: "University", year: "2016" },
-      { degree: "B.S.", field: "Marketing", institution: "University", year: "1989" }
-    ],
-    skills: ["sql","data analysis","program evaluation","dashboards"],
-    experience: [
-      { title: "Senior Researcher", org: "Public Health Agency", location: "Atlanta, GA", start: "2022", end: null,
-        bullets: ["led adolescent health research and evaluation projects","delivered insights to inform policy"],
-        skills: ["public health","evaluation","data analysis"]},
-      { title: "Policy Analyst", org: "Education Nonprofit", location: "Atlanta, GA", start: "2017", end: "2018",
-        bullets: ["managed policy initiatives and multi-sector partnerships"], skills: ["partnerships","policy analysis"]}
-    ]
-  }, null, 0);
+  const fewShotAssistant1 = [
+    "BEGIN_JSON",
+    JSON.stringify({
+      name: "Candidate",
+      contact: { email: null, phone: null, location: "Atlanta, GA", links: [] },
+      education: [
+        { degree: "Ph.D.", field: "Behavioral Science", institution: "University", year: "2016" },
+        { degree: "B.S.", field: "Marketing", institution: "University", year: "1989" }
+      ],
+      skills: ["sql","data analysis","program evaluation","dashboards"],
+      experience: [
+        { title: "Senior Researcher", org: "Public Health Agency", location: "Atlanta, GA", start: "2022", end: null,
+          bullets: ["led adolescent health research and evaluation projects","delivered insights to inform policy"],
+          skills: ["public health","evaluation","data analysis"]},
+        { title: "Policy Analyst", org: "Education Nonprofit", location: "Atlanta, GA", start: "2017", end: "2018",
+          bullets: ["managed policy initiatives and multi-sector partnerships"], skills: ["partnerships","policy analysis"]}
+      ]
+    }, null, 0),
+    "END_JSON"
+  ].join("\n");
 
   const user = [
     "BACKGROUND:",
@@ -731,18 +798,35 @@ async function normalizeResume(
     input
   ].join("\n");
 
-  const { json, text } = await aiJsonWithRetry(ai, model, [
+  const { json, text, method } = await aiJsonWithRetry(ai, model, [
     { role: "system",    content: system },
     { role: "user",      content: fewShotUser1 },
     { role: "assistant", content: fewShotAssistant1 },
     { role: "user",      content: user }
-  ], 'If your prior reply was not valid JSON, respond now with ONLY the strict JSON schema filled (no markdown).');
+  ], 'If your prior reply was not valid JSON, respond now with ONLY the strict JSON schema between BEGIN_JSON and END_JSON markers (no markdown).');
 
-  if (!json) {
-    console.warn("[normalizeResume] AI parse returned no JSON. AI text preview:", String(text ?? "").slice(0, ));
+  let finalJson = json;
+  let skillsFallbackUsed = false;
+
+  // If main normalize failed or skills array is empty, try skills-only fallback
+  if (!json || !Array.isArray(json?.skills) || json.skills.length === 0) {
+    console.log(`[normalizeResume] Main parse ${json ? 'succeeded but skills empty' : 'failed'} (method: ${method}), attempting skills-only fallback`);
+    const fallbackSkills = await extractSkillsOnly(ai, model, resumeText, backgroundText);
+    
+    if (fallbackSkills.length > 0) {
+      // Merge fallback skills into the main result
+      finalJson = json || {};
+      finalJson.skills = fallbackSkills;
+      skillsFallbackUsed = true;
+      console.log(`[normalizeResume] Skills fallback successful, merged ${fallbackSkills.length} skills`);
+    } else {
+      console.warn("[normalizeResume] Both main parse and skills fallback failed");
+    }
+  } else {
+    console.log(`[normalizeResume] Main parse successful via ${method}, skills count: ${json.skills.length}`);
   }
   // Defensive shaping with back-compat mirror
-  const j = json && typeof json === "object" ? json : {};
+  const j = finalJson && typeof finalJson === "object" ? finalJson : {};
   const name: string | null = (j?.name ?? null) as (string | null);
 
   const contact = {
@@ -780,6 +864,9 @@ async function normalizeResume(
     title: r.title, org: r.org, start: r.start, end: r.end, location: r.location, bullets: r.bullets
   }));
 
+  // Final logging for monitoring
+  console.log(`[normalizeResume] FINAL RESULT: parseMethod=${method}, skillsFallbackUsed=${skillsFallbackUsed}, skillsCount=${skills.length}, experienceCount=${experience.length}, educationCount=${education.length}`);
+
   return { name, contact, education, skills, experience, jobs };
 }
 
@@ -792,39 +879,112 @@ function normalizeAiString(resp: any): string {
 function stripFences(s: string) { return s.replace(/```json|```/g, "").trim(); }
 function tryParseJson(s: string): any { try { return JSON.parse(stripFences(s)); } catch { return null; } }
 
-async function aiJsonWithRetry(ai: Env["AI"], model: string, messages: any[], parseHint?: string): Promise<{text: string, json: any}> {
+/**
+ * Robust JSON parsing strategy for normalizeResume output.
+ * Attempts parsing in order: sentinel extraction, whole-string, balanced-braces salvage.
+ */
+function parseRobustJson(text: string): { json: any; method: string } {
+  const startTime = Date.now();
+  let method = "none";
+  let json: any = null;
+
+  // Strategy 1: Extract content between sentinel markers (BEGIN_JSON/END_JSON or BEGIN_SKILLS/END_SKILLS)
+  const jsonMarkers = ["BEGIN_JSON", "END_JSON"];
+  const skillsMarkers = ["BEGIN_SKILLS", "END_SKILLS"];
+  
+  for (const [beginMarker, endMarker] of [jsonMarkers, skillsMarkers]) {
+    const beginIndex = text.indexOf(beginMarker);
+    const endIndex = text.indexOf(endMarker);
+    
+    if (beginIndex !== -1 && endIndex !== -1 && endIndex > beginIndex) {
+      const extracted = text.slice(beginIndex + beginMarker.length, endIndex).trim();
+      json = tryParseJson(extracted);
+      if (json) {
+        method = beginMarker === "BEGIN_JSON" ? "sentinel" : "skills-sentinel";
+        console.log(`[parseRobustJson] SUCCESS via ${method} extraction, len=${extracted.length}, ms=${Date.now() - startTime}`);
+        return { json, method };
+      }
+    }
+  }
+
+  // Strategy 2: Try parsing the entire response as JSON
+  json = tryParseJson(text);
+  if (json) {
+    method = "whole-string";
+    console.log(`[parseRobustJson] SUCCESS via whole-string parse, len=${text.length}, ms=${Date.now() - startTime}`);
+    return { json, method };
+  }
+
+  // Strategy 3: Balanced-braces salvage - find the largest complete JSON object
+  const firstBrace = text.indexOf("{");
+  if (firstBrace !== -1) {
+    let braceCount = 0;
+    let lastValidEnd = -1;
+    
+    for (let i = firstBrace; i < text.length; i++) {
+      if (text[i] === "{") braceCount++;
+      else if (text[i] === "}") {
+        braceCount--;
+        if (braceCount === 0) {
+          lastValidEnd = i;
+        }
+      }
+    }
+    
+    if (lastValidEnd > firstBrace) {
+      const salvaged = text.slice(firstBrace, lastValidEnd + 1);
+      json = tryParseJson(salvaged);
+      if (json) {
+        method = "balanced-braces";
+        console.log(`[parseRobustJson] SUCCESS via balanced-braces salvage, len=${salvaged.length}, ms=${Date.now() - startTime}`);
+        return { json, method };
+      }
+    }
+    
+    // If no complete object found, try to salvage by adding missing closing braces
+    if (lastValidEnd === -1 && braceCount > 0) {
+      const partial = text.slice(firstBrace);
+      const salvaged = partial + "}".repeat(braceCount);
+      json = tryParseJson(salvaged);
+      if (json) {
+        method = "balanced-braces-fixed";
+        console.log(`[parseRobustJson] SUCCESS via balanced-braces-fixed salvage, len=${salvaged.length}, ms=${Date.now() - startTime}`);
+        return { json, method };
+      }
+    }
+  }
+
+  console.log(`[parseRobustJson] FAILED all strategies, len=${text.length}, ms=${Date.now() - startTime}`);
+  return { json: null, method: "failed" };
+}
+
+async function aiJsonWithRetry(ai: Env["AI"], model: string, messages: any[], parseHint?: string): Promise<{text: string, json: any, method?: string}> {
   const t0 = Date.now();
+  const promptSize = JSON.stringify(messages).length;
+  
   // request deterministic output and allow a larger reply
-  const run = async (msgs: any[]) => ai.run(model, { messages: msgs, temperature: 0, max_output_tokens: 10000 });
+  const run = async (msgs: any[]) => ai.run(model, { messages: msgs, temperature: 0, max_output_tokens: 12000 });
   let resp = await run(messages);
   let text = normalizeAiString(resp);
-  let json = tryParseJson(text);
+  let { json, method } = parseRobustJson(text);
 
+  // If parsing failed and we have a retry hint, try once more
   if (!json && parseHint) {
+    console.log(`[aiJsonWithRetry] Initial parse failed (${method}), retrying with hint`);
     const retryMsgs = [ messages[0], { role: "system", content: parseHint }, ...messages.slice(1) ];
     resp = await run(retryMsgs);
     text = normalizeAiString(resp);
-    json = tryParseJson(text);
+    const retryResult = parseRobustJson(text);
+    json = retryResult.json;
+    method = retryResult.method;
   }
 
-  // salvage attempt: if top-level parse failed, try to extract the first {...} JSON substring
-  if (!json && typeof text === "string") {
-    try {
-      const start = text.indexOf("{");
-      const endCandidates = [];
-      for (let i = start; i < Math.min(text.length, start + 4000); i++) {
-        if (text[i] === "}") endCandidates.push(i);
-      }
-      for (const end of endCandidates.reverse()) {
-        const sub = text.slice(start, end + 1);
-        const p = tryParseJson(sub);
-        if (p) { json = p; text = sub; break; }
-      }
-    } catch { /* ignore salvage errors */ }
-  }
-
-  console.log("[aiJsonWithRetry] ms=", Date.now() - t0, "len=", String(text ?? "").length);
-  return { text, json };
+  const duration = Date.now() - t0;
+  const outputLength = String(text ?? "").length;
+  
+  console.log(`[aiJsonWithRetry] promptSize=${promptSize}, outputLength=${outputLength}, duration=${duration}ms, method=${method}, success=${!!json}`);
+  
+  return { text, json, method };
 }
 
 async function proposeRoles(ai: Env["AI"], model: string, background: string, resumeJson: unknown):

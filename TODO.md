@@ -8,16 +8,15 @@
   - [x] Clone React–Vite–Hono template from Cloudflare
   - [x] Test basic Hono usage
 
-- [ ] **Anonymous identity cookie**
-  - [ ] Generate signed `uid` cookie with Web Crypto (HMAC)
-  - [ ] Attach cookie per request
-  - [ ] Reference: [Web Crypto API](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)
-
+- [x] **Anonymous identity cookie**
+  - [x] Generate signed `uid` cookie with Web Crypto (HMAC)
+  - [x] Attach cookie per request
+  - [x] Tested end to end scripts over HTTPS
 - [x] **Durable Object: `UserState`**
   - [x] Define class with storage schema (runs[], bulletBank, skillScores, lastResume)
   - [x] Methods: `createRun`, `saveRunPart`, `getRun`, `getHistory`, `setRoleCandidates`, `setSelectedRole`
-  - [x] Bind DO in wrangler config + migrations
-  - [x] Verified persistence with counter + run tests
+  - [x] Bind DO in wrangler config + migrations (switched to new_sqlite_classes)
+  - [x] Verify persistence -- seems good
 
 - [ ] **Design doc & endpoint spec**
   - [ ] Create `docs/DESIGN.md`: sequence from UI → Worker → Workflow → DO

@@ -6,17 +6,17 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  "durable_objects": {
-    "bindings": [{ "name": "USER_STATE", "class_name": "UserState" }]
-  },
   "observability": {
     "enabled": true
   },
   "ai": {
     "binding": "AI"
   },
+  "durable_objects": { "bindings": [
+  { "name": "USER_STATE_SQL", "class_name": "UserStateSql" }
+  ]},
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["UserState"] }
+  { "tag": "v1", "new_sqlite_classes": ["UserStateSql"] }
   ],
   "upload_source_maps": true,
   "assets": {

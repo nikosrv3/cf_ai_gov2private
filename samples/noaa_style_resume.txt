@@ -1,0 +1,70 @@
+DR. LEILA S. HAYES
+
+Curriculum Vitae
+September 2025
+
+PROFESSIONAL SUMMARY
+• Climate scientist and physical oceanographer with 11 years of experience in coastal modeling, remote sensing of oceanographic processes, and development of operational forecast products for coastal resilience.
+• Expertise in coupled atmosphere-ocean modeling, sensor network deployment, and the translation of model outputs into decision-support tools for emergency managers and coastal planners.
+• Experienced in managing large, interdisciplinary teams and multimillion-dollar observational programs.
+
+EDUCATION
+2014 Ph.D., Physical Oceanography, Scripps Institution of Oceanography, UC San Diego
+2010 M.S., Atmospheric Science, Colorado State University
+2008 B.A., Environmental Science & Economics, Williams College
+
+FEDERAL & RESEARCH EXPERIENCE
+2020–Present
+Program Manager / Senior Scientist, Marine Climate Services Division, NOAA Coastal Observations and Forecasting Center
+• Lead the Coastal Rapid Response Observing Network (CRRON) — a program coordinating coastal sensor arrays, autonomous surface vehicles, and citizen-science tide gauges across the Northeast Shelf to produce improved short-term surge and inundation forecasts.
+• Oversee program budget ($5.4M/year) and lead partner coordination with state agencies, academic institutions, and port authorities.
+• Developed and operationalized the "NowCast Coastal Surge" product used by three regional Warning Coordination Meteorologists to inform evacuation thresholds.
+
+2016–2020
+Research Scientist, Coastal Processes Lab, Northeastern University (funded by NOAA grants)
+• Led field campaigns for nearshore current profiling and sediment transport during storm seasons; published methodological advances for HF radar assimilation into coastal models.
+• Contributed to regional sea-level rise vulnerability assessments used by municipal planners.
+
+2014–2016
+Postdoctoral Researcher, Ocean Modeling Group, Woods Hole Oceanographic Institution
+• Developed data-assimilation schemes integrating glider and HF radar observations into mesoscale coastal models; improved short-term forecast skill during extreme events.
+
+SELECTED GRANTS & PROGRAMS
+• PI — NOAA Coastal Observing Integration Grant, $3.2M (2021–2025): Coastal Rapid Response Observing Network (CRRON).
+• Co-PI — NSF/NOAA Collaborative Project: "Assimilating Citizen Tide Data into Operational Forecasts", $2.1M (2018–2022).
+
+SELECTED PUBLICATIONS (HIGHLIGHTS)
+• Hayes LS, Morgan T, "Assimilation of HF Radar into Coastal Nowcasts: Improving Nearshore Current Forecasts," Journal of Coastal Research, 2023.
+• Hayes LS, "Operationalizing Community Tide Observations for Surge Forecasting," Bulletin of the American Meteorological Society, 2022.
+• Multiple technical reports and NOAA operational memos detailing sensor calibration standards and quality-control protocols.
+
+SERVICE, OUTREACH & TEACHING
+• Lead, NOAA Coastal Observations Training Workshop for State Partners (annual, 2021–Present).
+• Adjunct Lecturer, Graduate Coastal Modeling (Northeastern University), 2019–2022.
+• Organizer, Community Science Coastal Data Hackathon (2023).
+
+TECHNICAL SKILLS
+• Modeling: ROMS, FVCOM, WRF, ADCIRC coupling
+• Data assimilation: Ensemble Kalman Filter, 4D-Var concepts
+• Programming: Python (xarray, dask), MATLAB, Fortran (legacy model maintenance)
+• Remote sensing & instrumentation: HF radar, ADCP, gliders, tide gauges
+• Cloud & data platforms: AWS S3, NOAA Big Data Program interfaces, NCEI ingestion pipelines
+
+HONORS & RECOGNITION
+• NOAA Science to Service Award — 2024 (For rapid development of coastal surge nowcast product)
+• Early Career Coastal Researcher Prize — Coastal Society, 2018
+
+PROFESSIONAL AFFILIATIONS
+• American Geophysical Union (AGU)
+• Coastal and Estuarine Research Federation (CERF)
+• Association for the Sciences of Limnology and Oceanography (ASLO)
+
+LANGUAGES
+• Spanish (professional working proficiency)
+• Portuguese (reading)
+
+ADDITIONAL INFORMATION
+• Active collaborator with state emergency management agencies on coastal resilience exercises.
+• Holds small-boat operator certification and PADI open-water diver qualification.
+
+References provided upon request.

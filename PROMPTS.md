@@ -283,6 +283,17 @@ Support PDF export
 - Handle large docs gracefully
 ```
 
+### 18. Sample Resume Creation
+ChatGPT
+```
+Create three sample government resumes.
+
+- Base them off of this general structure: <redacted for privacy>
+- Make sure they don't contain any fake contact information or home addresses
+- Deliverables: 1 CDC, 1 NOAA, 1 DOD
+```
+
+
 ## Summary
 
 **Timeline:** Backend first, Frontend, Backend refactor to match frontend.  

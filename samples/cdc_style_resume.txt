@@ -1,0 +1,79 @@
+ALEXANDRA R. MONTGOMERY
+
+Curriculum Vitae
+September 2025
+
+SUMMARY OF QUALIFICATIONS
+• Epidemiologist and behavioral scientist with 12+ years of public health program design, field surveillance, and evaluation focused on environmental health and chronic disease prevention.
+• Experienced in leading multi-site surveillance initiatives, mixed-methods program evaluations, and cross-sector partnerships with state health departments, academic institutions, and community organizations.
+• Skilled in grant and contract management, data systems architecture for public health surveillance, and translating complex quantitative analyses into policy recommendations.
+• Strong communicator with extensive experience presenting to federal advisory committees, authoring peer-reviewed publications, and producing public-facing technical guidance.
+
+EDUCATION
+2013 Ph.D., Epidemiology, University of Michigan School of Public Health
+2009 M.P.H., Environmental Health Sciences, Emory University Rollins School of Public Health
+2006 B.S., Biology, summa cum laude, University of Vermont
+
+FEDERAL EXPERIENCE
+2019–Present
+Senior Epidemiologist, Division of Environmental Health Promotion, National Center for Environmental Health (NCEH), Silver Lake, MD
+• Lead the National Urban Air Quality and Health Outcomes Initiative (NUAHOI), overseeing surveillance across 18 metropolitan areas to evaluate associations between ambient pollutant episodes and emergency department visits for respiratory and cardiovascular conditions.
+• Direct a multidisciplinary team of epidemiologists, biostatisticians, and community liaisons to develop analytic pipelines, dashboards, and methodological guidance for near-real-time public health action.
+• Manage cooperative agreements and contracts totaling $12M annually across state and local health departments and academic partners.
+• Serve as subject-matter expert to the Office of Environmental Justice on cumulative exposure assessment and community engagement best practices.
+
+2016–2019
+Behavioral Science Lead, Climate and Health Program, NCEH (detail assignment)
+• Designed and implemented an intervention trial integrating heat-health warning systems with community-based cooling strategies in three pilot cities; led pre/post evaluation and dissemination.
+• Authored the agency's "Heat Resilience in Urban Communities" technical brief and training modules used by 42 jurisdictions.
+
+2012–2016
+Epidemiologist, State Surveillance Unit (contractor to NCEH), Great Lakes State Department of Health
+• Developed syndromic case definitions and automated surveillance alerts for environmental exposure events; reduced time-to-detection by 35%.
+• Conducted rapid field epidemiology investigations after two industrial chemical releases, coordinating with EPA and state emergency management.
+
+OTHER PROFESSIONAL EXPERIENCE
+2009–2012
+Research Associate, Center for Community Health Research, Emory University
+• Managed mixed-methods studies on environmental exposures in underserved neighborhoods; supervised graduate research assistants and implemented participatory data collection protocols.
+
+SELECTED GRANTS AND CONTRACTS (ROLE)
+• Principal Investigator (PI) — $2,750,000 cooperative agreement: National Urban Air Quality and Health Outcomes Initiative (2021–2025).
+• PI — $450,000 contract: Heat Resilience Trial — Pilot Implementation and Evaluation (2017–2019).
+• Co-Investigator — $1,100,000 multi-site study: Cumulative Exposure and Chronic Disease Risk (2018–2022).
+
+PUBLICATIONS (SELECTED)
+• Montgomery AR, Patel S, Greene L, et al. "Ambient particulate matter peaks and asthma exacerbations in urban children: a multi-city time-series analysis." Journal of Environmental Epidemiology. 2024;12(3):221–236.
+• Montgomery AR, Liao H. "Community-driven heat interventions: lessons from three U.S. pilot cities." American Journal of Public Health Practice. 2022;9(2):88–99.
+• Technical report: "Framework for Cumulative Exposure Assessment in Urban Settings." NCEH Technical Report. 2023.
+
+TECHNICAL SKILLS
+• Statistical: R (tidyverse, mgcv), Python (pandas, statsmodels), SAS
+• GIS & Spatial: ArcGIS, QGIS, spatial epidemiology methods
+• Data systems: RedCap, BioSense, CDC WONDER, SQL, API integration
+• Other: Qualitative methods, survey design, human subjects protocols (IRB), stakeholder facilitation
+
+TEACHING & MENTORING
+• Adjunct Instructor, Environmental Epidemiology (Graduate-level), State Public Health University, 2021–Present.
+• Mentor, Emerging Leaders in Public Health Fellowship (NCEH), 2020–Present.
+
+PROFESSIONAL AFFILIATIONS
+• American Public Health Association (APHA)
+• International Society for Environmental Epidemiology (ISEE)
+• Society for Epidemiologic Research (SER)
+
+AWARDS & HONORS
+• 2024 NCEH Excellence in Community Engagement Award
+• 2021 Regional Public Health Innovator Award (Mid-Atlantic Public Health Consortium)
+
+SERVICE & ADVISORY
+• Member, Advisory Panel for Urban Climate Health (Office of Environmental Justice), 2023–Present.
+• Ad hoc reviewer: Environmental Health Perspectives; Journal of Urban Health.
+
+LANGUAGES
+• Spanish (conversational), French (reading proficiency)
+
+PERSONAL INTERESTS
+• Urban gardening, long-distance trail running, community science workshops
+
+References available upon request.

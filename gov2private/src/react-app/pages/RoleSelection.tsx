@@ -121,7 +121,7 @@ export default function RoleSelection() {
   return (
     <div className="max-w-4xl mx-auto">
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
-        {submitting && <Loading message="Generating your tailored resume..." fullScreen />}
+        {submitting && <Loading message="Generating your tailored resume, this can take a minute..." fullScreen />}
         
         <div className="p-6 border-b border-slate-200">
           <h1 className="text-2xl font-semibold">Select Your Target Role</h1>

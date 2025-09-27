@@ -9,6 +9,7 @@ This tool is a starting point for an industry job search / resume tailoring --- 
 ## Live Demo
 
 [Deployed Application](https://gov2private.nikosfirst.workers.dev/) - Try it out with your government resume!
+[Loom Demo](https://www.loom.com/share/6dc7fe38df154aeb89ea3b2abe600483?sid=aa04fde7-03d0-41a4-91fb-947dc40800f6) - take a quick look at the flow using this video!
 
 ## Overview
 

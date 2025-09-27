@@ -1,7 +1,7 @@
 // src/worker/userStateClient.ts
 // Typed client wrapper for calling the SQLite-backed UserState Durable Object via stub.fetch()
 
-import type { RunData, RunIndexItem, RoleCandidate } from "../types/run";
+import type { RunData, RunIndexItem, JobRole } from "../types/run";
 import type { UserStateSql } from "./UserStateSql";
 
 type Ok<T> = { ok: true } & T;
@@ -21,10 +21,10 @@ export type UserStateClient = {
   saveRunPart(id: string, patch: Partial<RunData>): Promise<RunData>;
   getRun(id: string): Promise<RunData | null>;
   getHistory(limit?: number): Promise<RunIndexItem[]>;
-  setRoleCandidates(id: string, candidates: RoleCandidate[]): Promise<void>;
+  setRoleCandidates(id: string, candidates: JobRole[]): Promise<void>;
   setSelectedRole(
     id: string,
-    roleId: string,
+    role: JobRole,
     opts: { jobDescription?: string; source?: "user_pasted" | "llm_generated" }
   ): Promise<RunData>;
 };
@@ -83,11 +83,11 @@ export function getUserStateClient(
       mustOk(j);
     },
 
-    async setSelectedRole(runId, roleId, opts) {
+    async setSelectedRole(runId, role, opts) {
       const r = await stub.fetch("http://do/do/select-role", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: runId, roleId, opts })
+        body: JSON.stringify({ id: runId, role, opts })
       });
       const j = (await r.json()) as RunResp;
       mustOk(j);

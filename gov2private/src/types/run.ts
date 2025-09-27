@@ -2,7 +2,7 @@
  * Centralized types shared between Worker routes and the Durable Object.
  */
 
-export type RunStatus = "queued" | "awaiting_role" | "running" | "done" | "error";
+export type RunStatus = "queued" | "pending" | "generating" | "role_selection" | "done" | "error";
 export type JobDescSource = "user_pasted" | "llm_generated";
 export type ChatTurn = { role: "user" | "assistant"; content: string };
 
@@ -29,33 +29,65 @@ export interface RunIndexItem {
   status: RunStatus;
 }
 
+export interface JobRole {
+  id: string;
+  title: string;
+  company?: string;
+  description: string;
+  requirements?: string[];
+  score?: number;  // 0..100
+  source?: "ai" | "user";
+}
+
+export interface NormalizedData {
+  name: string | null;
+  contact: {
+    email: string | null;
+    phone: string | null;
+    location: string | null;
+    links: string[];
+  };
+  summary?: string | null;
+  skills: string[];
+  certifications?: string[];
+  education: Array<{
+    degree: string;
+    field?: string | null;
+    institution: string;
+    year?: string | null;
+  }>;
+  experience: Array<{
+    title: string;
+    org: string;
+    location?: string | null;
+    start?: string | null;
+    end?: string | null;
+    bullets: string[];
+    skills?: string[];
+  }>;
+}
+
 export interface RunData {
   id: string;
   createdAt: string;
-  updatedAt: string;
+  updatedAt?: string;
   status: RunStatus;
-
-  background?: string;
   targetRole?: string;
-
+  background?: string;
   selectedRoleId?: string;
-  jobDescription?: string;
-  jobDescriptionSource?: JobDescSource;
-
   phases?: {
-    normalize?: unknown;
-    roleDiscovery?: {
-      candidates: RoleCandidate[];
-      debugRaw?: string; 
-    };
-    bullets_history?: string[][];
+    normalize?: NormalizedData;
+    roleDiscovery?: JobRole[];                 // REQUIRED for RoleSelection page
+    selectedRole?: JobRole;                    // REQUIRED after role chosen
     requirements?: { must_have: string[]; nice_to_have: string[] };
-    mapping?: unknown;
+    mapping?: any;
     bullets?: string[];
-    scoring?: { skill: string; score: number; depth?: number }[];
+    bullets_history?: string[][];
+    scoring?: Array<{ skill: string; score: number; depth?: number }>;
     draft?: string;
-
-    chat?: ChatTurn[];
-    coaching?: Record<string, string[]>;
+    chat?: Array<{ role: "user" | "assistant"; content: string; timestamp?: string }>;
   };
+  // For tailoring context:
+  jobDescription?: string;
+  jobDescriptionSource?: "user_pasted" | "llm_generated";
 }

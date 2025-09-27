@@ -3,7 +3,7 @@
 
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
-import type { RunData, RunIndexItem, RoleCandidate, RunStatus } from "../types/run";
+import type { RunData, RunIndexItem, JobRole, RunStatus } from "../types/run";
 
 const MAX_RUNS = 20;
 type Env = unknown;
@@ -181,27 +181,28 @@ export class UserStateSql extends DurableObject<Env> {
     }));
   }
 
-  public async setRoleCandidates(id: string, candidates: RoleCandidate[]): Promise<void> {
+  public async setRoleCandidates(id: string, candidates: JobRole[]): Promise<void> {
     const run = await this.getRunOrThrow(id);
     run.phases ??= {};
-    run.phases.roleDiscovery = { candidates };
-    run.status = "awaiting_role";
+    run.phases.roleDiscovery = candidates;
+    run.status = "role_selection";
     run.updatedAt = new Date().toISOString();
     await this.saveRunPart(id, run);
   }
 
   public async setSelectedRole(
     id: string,
-    roleId: string,
+    role: JobRole,
     opts: { jobDescription?: string; source?: "user_pasted" | "llm_generated" }
   ): Promise<RunData> {
     const run = await this.getRunOrThrow(id);
-    run.selectedRoleId = roleId;
+    run.phases ??= {};
+    run.phases.selectedRole = role;
     if (opts.jobDescription) {
       run.jobDescription = opts.jobDescription;
       run.jobDescriptionSource = opts.source ?? "user_pasted";
     }
-    run.status = "running";
+    run.status = "generating";
     run.updatedAt = new Date().toISOString();
     return await this.saveRunPart(id, run);
   }
@@ -237,17 +238,17 @@ export class UserStateSql extends DurableObject<Env> {
         return Response.json({ ok: true, run });
       }
       if (req.method === "POST" && url.pathname === "/do/role-candidates") {
-        const body = (await req.json()) as { id: string; candidates: RoleCandidate[] };
+        const body = (await req.json()) as { id: string; candidates: JobRole[] };
         await this.setRoleCandidates(body.id, body.candidates);
         return Response.json({ ok: true });
       }
       if (req.method === "POST" && url.pathname === "/do/select-role") {
         const body = (await req.json()) as {
           id: string;
-          roleId: string;
+          role: JobRole;
           opts?: { jobDescription?: string; source?: "user_pasted" | "llm_generated" };
         };
-        const run = await this.setSelectedRole(body.id, body.roleId, body.opts ?? {});
+        const run = await this.setSelectedRole(body.id, body.role, body.opts ?? {});
         return Response.json({ ok: true, run });
       }
 

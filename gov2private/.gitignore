@@ -23,6 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 ./powershell_tests/*
+.scripts/*
 
 # wrangler files
 .wrangler

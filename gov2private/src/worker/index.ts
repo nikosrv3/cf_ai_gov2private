@@ -1,102 +1,126 @@
-// src/worker/index.ts
-// Hono Worker entry: role discovery + selection + tailoring demo routes.
-// Uses env.MODEL (wrangler.json "vars") for all AI calls.
-// Signed anonymous uid via APP_SECRET (HMAC) with cookie middleware.
+// Main worker file - handles all the API routes
+// TODO: maybe split this into separate route files later if it gets too big
 export { UserStateSql } from "./UserStateSql";
+
 import { Hono } from "hono";
 import type { UserStateSql } from "./UserStateSql";
 import { getUserStateClient } from "./userStateClient";
-import { toChatTurns, type ChatTurn, type RoleCandidate, type RunData } from "../types/run";
+import { toChatTurns, type ChatTurn, type JobRole, type RunData, type NormalizedData } from "../types/run";
 import { ensureUidFromCookieHeader } from "./cookies";
 
-/* -------------------- Bindings -------------------- */
+// AI functions - moved these to separate file to keep things organized
+import {
+  normalizeResume,
+  proposeRoles,
+  generateShortJD,
+  extractRequirements,
+  mapTransferable,
+  rewriteExperienceBullets,
+  transformBulletsBatch,
+  scoreSkills,
+  assembleDraft
+} from "./ai";
+
+// Environment bindings - these come from wrangler.toml
 type Env = {
-  AI: any;
+  AI: any; // Workers AI binding
   USER_STATE_SQL: DurableObjectNamespace<UserStateSql>;
-  MODEL: string;
-  APP_SECRET: string;
+  MODEL: string; // AI model to use
+  APP_SECRET: string; // for signing cookies
 };
 
 const app = new Hono<{ Bindings: Env; Variables: { uid: string } }>();
 
-/* -------------------- UID Cookie Middleware -------------------- */
+// Middleware to handle user identification via cookies
+// This creates anonymous users so we don't need login
 app.use("*", async (c, next) => {
   const secret = c.env.APP_SECRET;
   if (!secret) {
+    console.error("Missing APP_SECRET in environment");
     return c.json({ ok: false, error: "server_misconfigured: missing APP_SECRET" }, 500);
   }
 
   const cookieHeader = c.req.header("Cookie");
   const { uid, setCookies } = await ensureUidFromCookieHeader(secret, cookieHeader);
 
-  for (const sc of setCookies) c.header("Set-Cookie", sc, { append: true });
+  // Set any new cookies that need to be created
+  for (const sc of setCookies) {
+    c.header("Set-Cookie", sc, { append: true });
+  }
 
   c.set("uid", uid);
   await next();
 });
 
-/* -------------------- Health -------------------- */
+// Simple health check endpoint
 app.get("/api/health", (c) => c.text("ok"));
 
-/* -------------------- Role Discovery -------------------- */
+// Main endpoint for discovering job roles based on resume
 app.post("/api/discover-jobs", async (c) => {
+  try {
   const body = (await c.req.json().catch(() => ({}))) as {
-    background?: string; resumeText?: string; runId?: string;
+      background?: string; 
+      resumeText?: string;
   };
 
   const uid = c.get("uid");
   const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
 
-  const runId = body.runId ?? randomId();
-  await user.createRun(runId, { background: body.background, status: "queued" });
+    // Create a new run for this user
+    const runId = randomId();
+    await user.createRun(runId, { status: "queued" });
 
-  // NEW: AI-backed normalization (de-identified few-shot), persisted to phases.normalize
-  const resumeJson = await normalizeResume(c.env.AI, c.env.MODEL, body.resumeText ?? "", body.background ?? "");
+    // Parse and normalize the resume using AI
+    const resumeJson = await normalizeResume(
+      c.env.AI, 
+      c.env.MODEL, 
+      body.resumeText ?? "", 
+      body.background ?? ""
+    );
   await user.saveRunPart(runId, { phases: { normalize: resumeJson } });
 
-  // Propose roles (safe JSON, centralized model)
-  const { candidates, raw } = await proposeRoles(c.env.AI, c.env.MODEL, body.background ?? "", resumeJson);
-  await user.saveRunPart(runId, { phases: { roleDiscovery: { candidates, debugRaw: raw } } });
-
-  // Enrich roles with short AI JDs (best-effort)
-  const enriched: RoleCandidate[] = [];
-  for (const r of candidates) {
-    const jd = await generateShortJD(c.env.AI, c.env.MODEL, r.title).catch(() => undefined);
-    enriched.push({ ...r, id: String(r.id), aiJobDescription: jd });
-  }
-
-  await user.setRoleCandidates(runId, enriched);
+    // Get AI to suggest relevant job roles
+    const { candidates } = await proposeRoles(
+      c.env.AI, 
+      c.env.MODEL, 
+      body.background ?? "", 
+      resumeJson
+    );
+    await user.setRoleCandidates(runId, candidates);
 
   const run = (await user.getRun(runId)) as RunData | null;
   return c.json({ ok: true, run });
+  } catch (error) {
+    console.error("Error in discover-jobs:", error);
+    return c.json({ ok: false, error: "discovery_failed" }, 500);
+  }
 });
 
-/* -------------------- Read endpoints -------------------- */
+// Get a specific run by ID
 app.get("/api/run/:id", async (c) => {
   const runId = c.req.param("id");
   const uid = c.get("uid");
   const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
+  
   const run = await user.getRun(runId);
-  if (!run) return c.json({ ok: false, error: "not_found" }, 404);
+  if (!run) {
+    return c.json({ ok: false, error: "not_found" }, 404);
+  }
+  
   return c.json({ ok: true, run });
 });
 
+// Get user's run history
 app.get("/api/history", async (c) => {
   const uid = c.get("uid");
   const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
+  
+  // Limit to last 20 runs to keep response size reasonable
   const items = await user.getHistory(20);
   return c.json({ ok: true, items });
 });
 
-/* -------------------- Roles & Tailoring -------------------- */
-app.get("/api/run/:id/roles", async (c) => {
-  const uid = c.get("uid");
-  const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
-  const run = (await user.getRun(c.req.param("id"))) as RunData | null;
-  if (!run) return c.json({ ok: false, error: "not_found" }, 404);
-  const candidates = run.phases?.roleDiscovery?.candidates ?? [];
-  return c.json({ ok: true, candidates, status: run.status });
-});
+// Role selection and tailoring endpoints
 
 app.post("/api/run/:id/select-role", async (c) => {
   const runId = c.req.param("id");
@@ -104,52 +128,209 @@ app.post("/api/run/:id/select-role", async (c) => {
   const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
 
   const body = (await c.req.json().catch(() => ({}))) as {
-    roleId: string;
+    roleId?: string;
+    customRole?: JobRole;
     jobDescription?: string;
     useAiGenerated?: boolean;
   };
 
   const run = (await user.getRun(runId)) as RunData | null;
-  if (!run) return c.json({ ok: false, error: "not_found" }, 404);
+  if (!run) {
+    return c.json({ ok: false, error: "not_found" }, 404);
+  }
 
-  const candidates = run.phases?.roleDiscovery?.candidates ?? [];
-  const chosen = candidates.find((r) => String(r.id) === String(body.roleId)); // <— compare as strings
-  if (!chosen) return c.json({ ok: false, error: "invalid_role" }, 400);
+  let chosenRole: JobRole;
+  
+  if (body.customRole) {
+    // User provided their own custom role
+    chosenRole = body.customRole;
+  } else if (body.roleId) {
+    // Find the selected role from our candidates
+    const candidates = run.phases?.roleDiscovery ?? [];
+    const chosen = candidates.find((r) => String(r.id) === String(body.roleId));
+    
+    if (!chosen) {
+      return c.json({ ok: false, error: "invalid_role" }, 400);
+    }
+    chosenRole = chosen;
+  } else {
+    return c.json({ ok: false, error: "missing_role" }, 400);
+  }
 
+  // Handle job description - either user provided or we generate one
   let jd = body.jobDescription?.trim();
   let source: "user_pasted" | "llm_generated" = "user_pasted";
-  if (!jd && body.useAiGenerated) { jd = chosen.aiJobDescription ?? ""; source = "llm_generated"; }
-  if (!jd) return c.json({ ok: false, error: "missing_job_description" }, 400);
+  
+  if (!jd) {
+    if (body.useAiGenerated) {
+      // Generate a job description using AI
+      jd = await generateShortJD(c.env.AI, c.env.MODEL, chosenRole.title).catch(() => "");
+      source = "llm_generated";
+    } else {
+      // Use the description from the role candidate
+      jd = chosenRole.description;
+      source = "llm_generated";
+    }
+  }
 
-  await user.setSelectedRole(runId, chosen.id, { jobDescription: jd, source });
+  await user.setSelectedRole(runId, chosenRole, { jobDescription: jd, source });
 
-  const requirements = await extractRequirements(c.env.AI, c.env.MODEL, chosen.title, jd);
+  // Now run the full tailoring pipeline
+  const requirements = await extractRequirements(c.env.AI, c.env.MODEL, chosenRole.title, jd);
   await user.saveRunPart(runId, { phases: { requirements } });
 
-  const mapping = await mapTransferable(run.phases?.normalize ?? {}, requirements);
+  // Map transferable skills from resume to job requirements
+  const mapping = await mapTransferable(
+    c.env.AI, 
+    c.env.MODEL, 
+    run.phases?.normalize as NormalizedData ?? {
+      name: null,
+      contact: { email: null, phone: null, location: null, links: [] },
+      skills: [],
+      education: [],
+      experience: [],
+      certifications: []
+    }, 
+    requirements
+  );
   await user.saveRunPart(runId, { phases: { mapping } });
 
-  const bullets = await rewriteBullets(c.env.AI, c.env.MODEL, mapping, chosen.title);
-  await user.saveRunPart(runId, { phases: { bullets } });
+  // Rewrite the experience bullets to be more relevant to the target role
+  const updatedExperience = await rewriteExperienceBullets(
+    c.env.AI, 
+    c.env.MODEL, 
+    run.phases?.normalize?.experience || [], 
+    mapping, 
+    chosenRole.title
+  );
+  
+  // Update the normalized data with the new experience bullets
+  const currentNormalize = run.phases?.normalize || {
+    name: null,
+    contact: { email: null, phone: null, location: null, links: [] },
+    skills: [],
+    education: [],
+    experience: [],
+    certifications: []
+  };
+  await user.saveRunPart(runId, { 
+    phases: { 
+      normalize: { 
+        ...currentNormalize, 
+        experience: updatedExperience 
+      } 
+    } 
+  });
 
   const scoring = await scoreSkills(mapping);
   await user.saveRunPart(runId, { phases: { scoring } });
 
   const draft = await assembleDraft(c.env.AI, c.env.MODEL, {
-    bullets, requirements, mapping, background: run.background, title: chosen.title
+    bullets: [], // No longer using separate bullets, experience bullets are in the normalize section
+    requirements, mapping, background: run.background, title: chosenRole.title
   });
-  await user.saveRunPart(runId, { phases: { draft }, status: "done", targetRole: chosen.title });
+  await user.saveRunPart(runId, { phases: { draft }, status: "done", targetRole: chosenRole.title });
 
   const finalRun = (await user.getRun(runId)) as RunData | null;
   return c.json({ ok: true, run: finalRun });
 });
 
-// chatbot endpoints --------------------------------------------------
+/* -------------------- Change Role -------------------- */
+app.post("/api/run/:id/change-role", async (c) => {
+  const runId = c.req.param("id");
+  const uid = c.get("uid");
+  const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
 
-const BULLET_STYLE_INSTRUCTIONS: Record<
-  "quant" | "short" | "lead" | "ats" | "dejargon",
-  string
-> = {
+  const body = (await c.req.json().catch(() => ({}))) as {
+    roleId?: string;
+    customRole?: JobRole;
+  };
+
+  const run = (await user.getRun(runId)) as RunData | null;
+  if (!run) return c.json({ ok: false, error: "not_found" }, 404);
+
+  let chosenRole: JobRole;
+  
+  if (body.customRole) {
+    chosenRole = body.customRole;
+  } else if (body.roleId) {
+    const candidates = run.phases?.roleDiscovery ?? [];
+    const chosen = candidates.find((r) => String(r.id) === String(body.roleId));
+    if (!chosen) return c.json({ ok: false, error: "invalid_role" }, 400);
+    chosenRole = chosen;
+  } else {
+    return c.json({ ok: false, error: "missing_role" }, 400);
+  }
+
+  // Generate job description if not provided
+  const jd = await generateShortJD(c.env.AI, c.env.MODEL, chosenRole.title).catch(() => chosenRole.description);
+  
+  await user.setSelectedRole(runId, chosenRole, { jobDescription: jd, source: "llm_generated" });
+  await user.saveRunPart(runId, { status: "generating" });
+
+  return c.json({ ok: true });
+});
+
+/* -------------------- Generate -------------------- */
+app.post("/api/run/:id/generate", async (c) => {
+  const runId = c.req.param("id");
+  const uid = c.get("uid");
+  const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
+
+  const run = (await user.getRun(runId)) as RunData | null;
+  if (!run) return c.json({ ok: false, error: "not_found" }, 404);
+
+  const selectedRole = run.phases?.selectedRole;
+  if (!selectedRole) return c.json({ ok: false, error: "no_selected_role" }, 400);
+
+  const jd = run.jobDescription || selectedRole.description;
+
+  // Run the full tailoring pipeline
+  const requirements = await extractRequirements(c.env.AI, c.env.MODEL, selectedRole.title, jd);
+  await user.saveRunPart(runId, { phases: { requirements } });
+
+  const mapping = await mapTransferable(c.env.AI, c.env.MODEL, run.phases?.normalize as NormalizedData ?? {
+    name: null,
+    contact: { email: null, phone: null, location: null, links: [] },
+    skills: [],
+    education: [],
+    experience: [],
+    certifications: []
+  }, requirements);
+  await user.saveRunPart(runId, { phases: { mapping } });
+
+  // Update experience bullets instead of creating separate Key Achievements
+  const updatedExperience = await rewriteExperienceBullets(c.env.AI, c.env.MODEL, run.phases?.normalize?.experience || [], mapping, selectedRole.title);
+  const currentNormalize = run.phases?.normalize || {
+    name: null,
+    contact: { email: null, phone: null, location: null, links: [] },
+    skills: [],
+    education: [],
+    experience: [],
+    certifications: []
+  };
+  await user.saveRunPart(runId, { phases: { normalize: { ...currentNormalize, experience: updatedExperience } } });
+
+  const scoring = await scoreSkills(mapping);
+  await user.saveRunPart(runId, { phases: { scoring } });
+
+  const draft = await assembleDraft(c.env.AI, c.env.MODEL, {
+    bullets: [], // No longer using separate bullets, experience bullets are in the normalize section
+    requirements, mapping, background: run.background, title: selectedRole.title
+  });
+  await user.saveRunPart(runId, { phases: { draft }, status: "done", targetRole: selectedRole.title });
+
+  const finalRun = (await user.getRun(runId)) as RunData | null;
+  return c.json({ ok: true, run: finalRun });
+});
+
+/* -------------------- Chatbot endpoints -------------------- */
+
+type BulletStyle = "quant" | "short" | "lead" | "ats" | "dejargon";
+
+
+
+const BULLET_STYLE_INSTRUCTIONS: Record<BulletStyle, string> = {
   quant:
     "Rewrite as a single resume bullet. Lead with a strong verb, add realistic quantification (use '~' for estimates), keep meaning, no fluff.",
   short:
@@ -162,46 +343,93 @@ const BULLET_STYLE_INSTRUCTIONS: Record<
     "Rewrite in plain industry terms (remove government jargon). Single bullet, keep technical accuracy."
 };
 
-// Batch-transform bullets: give model a numbered list; expect a JSON array back.
-async function transformBulletsBatch(
-  ai: Env["AI"],
-  model: string,
-  bullets: string[],
-  instruction: string,
-  indexes: number[]
-): Promise<string[]> {
-  const list = indexes.map((i, k) => `${k + 1}. ${bullets[i].slice(0, 400)}`).join("\n");
-  const sys = `You rewrite resume bullets according to an instruction.
-Return ONLY strict JSON: {"bullets":["rewritten bullet 1","rewritten bullet 2",...]} with the same count as input. No markdown.`;
-  const usr = `INSTRUCTION: ${instruction}
-INPUT BULLETS (${indexes.length}):
-${list}`;
-
-  const { text, json } = await aiJsonWithRetry(ai, model, [
-    { role: "system", content: sys },
-    { role: "user", content: usr }
-  ], `If your prior reply wasn't valid JSON, respond now ONLY with: {"bullets":["..."]}`);
-
-  const out = (json?.bullets ?? []) as string[];
-  if (!Array.isArray(out) || out.length !== indexes.length) {
-    // Fallback: naive line split
-    const lines = String(text).split(/\r?\n/).map(s => s.replace(/^[-–•\d.]+\s*/, "").trim()).filter(Boolean);
-    return indexes.map((_, k) => (lines[k] ?? bullets[indexes[k]])).map(s =>
-      s.replace(/^[-–•]\s*/, "").replace(/^["“”']|["“”']$/g, "").trim().slice(0, 300)
-    );
-  }
-  return out.map(s => String(s).replace(/^[-–•]\s*/, "").replace(/^["“”']|["“”']$/g, "").trim().slice(0, 300));
+// LinkedIn search URL generator
+function generateLinkedInSearchUrl(jobTitle: string, location?: string): string {
+  // Encode spaces but keep quotes visible in the URL
+  const encodedKeywords = jobTitle.replace(/ /g, '%20');
+  const encodedLocation = location ? encodeURIComponent(location) : "";
+  
+  // LinkedIn job search with boolean operators - build URL manually
+  const baseUrl = "https://www.linkedin.com/jobs/search/";
+  const params = [
+    `keywords=${encodedKeywords}`, // Keep quotes visible, encode spaces
+    `location=${encodedLocation}`,
+    `f_TPR=r604800`, // Past week
+    `f_JT=F`, // Full-time
+    `f_WT=2`, // Remote
+    `f_E=2%2C3%2C4%2C5`, // Mid to senior level (manually encoded comma)
+    `sortBy=DD` // Date posted
+  ].filter(p => !p.includes('location=') || encodedLocation).join('&');
+  
+  return `${baseUrl}?${params}`;
 }
+
+// Generate multiple LinkedIn search variations
+function generateLinkedInSearchLinks(jobTitle: string, location?: string): Array<{title: string, url: string}> {
+  const links = [];
+  
+  // Main search - just the job title without quotes for simple search
+  links.push({
+    title: `${jobTitle} Jobs`,
+    url: generateLinkedInSearchUrl(jobTitle, location)
+  });
+  
+  // Alternative searches with boolean operators
+  const titleWords = jobTitle.toLowerCase().split(/\s+/);
+  if (titleWords.length > 1) {
+    // Search with AND operator - each word gets its own quotes
+    const andSearch = titleWords.map(word => `"${word}"`).join(" AND ");
+    links.push({
+      title: `${andSearch} (Exact Match)`,
+      url: generateLinkedInSearchUrl(andSearch, location)
+    });
+    
+    // Search with OR operator for related terms - each word gets its own quotes
+    const orSearch = titleWords.map(word => `"${word}"`).join(" OR ");
+    links.push({
+      title: `${orSearch} (Related Roles)`,
+      url: generateLinkedInSearchUrl(orSearch, location)
+    });
+  }
+  
+  // Senior level search
+  links.push({
+    title: `Senior ${jobTitle}`,
+    url: generateLinkedInSearchUrl(`Senior ${jobTitle}`, location)
+  });
+  
+  return links;
+}
+
+// Humanized response messages
+const HUMANIZED_RESPONSES = {
+  bulletTransform: {
+    quant: "I've added more numbers and metrics to make your bullets more impactful!",
+    short: "I've made your bullets more concise and punchy!",
+    lead: "I've enhanced your bullets with stronger leadership language!",
+    ats: "I've optimized your bullets with ATS-friendly keywords!",
+    dejargon: "I've simplified your bullets to be clearer and more accessible!"
+  },
+  summaryTransform: {
+    quant: "I've made your professional summary more data-driven with specific metrics!",
+    short: "I've condensed your summary to be more impactful and concise!",
+    lead: "I've strengthened your summary with executive-level language!",
+    ats: "I've optimized your summary with relevant keywords for better visibility!",
+    dejargon: "I've simplified your summary to be more accessible and clear!"
+  }
+};
+
 
 app.post("/api/chat", async (c) => {
   const uid = c.get("uid"); // from cookie middleware
   const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
 
-  type ChatBody = { runId?: string; message?: string };
+  type ChatBody = { runId?: string; message?: string; context?: string };
   const body = (await c.req.json().catch(() => ({}))) as ChatBody;
 
   const runId = body.runId?.trim();
   const userMsg = (body.message ?? "").trim();
+  const context = body.context || "general";
   if (!userMsg) return c.json({ ok: false, error: "empty_message" }, 400);
 
   const run = runId ? await user.getRun(runId) : null;
@@ -219,7 +447,7 @@ app.post("/api/chat", async (c) => {
     ctx.push("RUN: none");
   }
 
-  // Lightweight intent handling (optional; keep simple)
+  // Lightweight intent handling
   const lower = userMsg.toLowerCase();
   const mExplain = lower.match(/\bexplain role (\d+)\b/);
   const mSelect = lower.match(/\bselect role (\d+)\b/);
@@ -240,46 +468,62 @@ app.post("/api/chat", async (c) => {
   }
 
   // Intent: explain role N
-  if (mExplain && run?.phases?.roleDiscovery?.candidates) {
+  if (mExplain && run?.phases?.roleDiscovery) {
     const idx = Number(mExplain[1]) - 1;
-    const cand = run.phases.roleDiscovery.candidates[idx];
+    const cand = run.phases.roleDiscovery[idx];
     if (!cand) return reply(`I can't find role ${mExplain[1]}.`);
     const expl = [
       `**${cand.title}** — why it fits:`,
-      `• ${cand.rationale}`,
-      `• Confidence: ${(cand.confidence * 100).toFixed(0)}%`,
-      cand.aiJobDescription ? `• What you'd do: ${cand.aiJobDescription.slice(0, 240)}…` : ""
+      `• ${cand.description}`,
+      cand.score ? `• Match score: ${cand.score}%` : ""
     ].filter(Boolean).join("\n");
     return reply(expl);
   }
 
   // Intent: select role N
-  if (mSelect && runId && run?.phases?.roleDiscovery?.candidates) {
+  if (mSelect && runId && run?.phases?.roleDiscovery) {
     const idx = Number(mSelect[1]) - 1;
-    const cand = run.phases.roleDiscovery.candidates[idx];
+    const cand = run.phases.roleDiscovery[idx];
     if (!cand) return reply(`I can't find role ${mSelect[1]}.`);
 
     try {
-      await user.setSelectedRole(runId, String(cand.id), {
-        jobDescription: cand.aiJobDescription ?? undefined,
-        source: cand.aiJobDescription ? "llm_generated" : "user_pasted"
+      await user.setSelectedRole(runId, cand, {
+        jobDescription: cand.description,
+        source: "llm_generated"
       });
 
-      const jd = cand.aiJobDescription ?? (run?.jobDescription ?? "");
+      const jd = cand.description;
       const requirements = await extractRequirements(c.env.AI, c.env.MODEL, cand.title, jd);
       await user.saveRunPart(runId, { phases: { requirements } });
 
-      const mapping = await mapTransferable(run?.phases?.normalize ?? {}, requirements);
+      const mapping = await mapTransferable(c.env.AI, c.env.MODEL, run?.phases?.normalize as NormalizedData ?? {
+        name: null,
+        contact: { email: null, phone: null, location: null, links: [] },
+        skills: [],
+        education: [],
+        experience: [],
+        certifications: []
+      }, requirements);
       await user.saveRunPart(runId, { phases: { mapping } });
 
-      const bullets = await rewriteBullets(c.env.AI, c.env.MODEL, mapping, cand.title);
-      await user.saveRunPart(runId, { phases: { bullets } });
+      // Update experience bullets instead of creating separate Key Achievements
+      const updatedExperience = await rewriteExperienceBullets(c.env.AI, c.env.MODEL, run?.phases?.normalize?.experience || [], mapping, cand.title);
+      const currentNormalize = run?.phases?.normalize || {
+        name: null,
+        contact: { email: null, phone: null, location: null, links: [] },
+        skills: [],
+        education: [],
+        experience: [],
+        certifications: []
+      };
+      await user.saveRunPart(runId, { phases: { normalize: { ...currentNormalize, experience: updatedExperience } } });
 
       const scoring = await scoreSkills(mapping);
       await user.saveRunPart(runId, { phases: { scoring } });
 
       const draft = await assembleDraft(c.env.AI, c.env.MODEL, {
-        bullets, requirements, mapping, background: run?.background, title: cand.title
+        bullets: [], // No longer using separate bullets, experience bullets are in the normalize section
+        requirements, mapping, background: run?.background, title: cand.title
       });
       await user.saveRunPart(runId, { phases: { draft }, status: "done", targetRole: cand.title });
 
@@ -290,67 +534,269 @@ app.post("/api/chat", async (c) => {
     }
   }
 
-  if (run && Array.isArray(run.phases?.bullets) && run.phases!.bullets!.length > 0) {
-    const bullets = run.phases!.bullets as string[];
+  // Bullet edit intent path - handle different contexts
+  if (run && run.phases) {
     const msgLower = userMsg.toLowerCase();
     const model = c.env.MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+    const style = detectStyleNL(msgLower);
 
-    // 1) Try LLM intent parser first
-    let intent: BulletEditIntent | null = null;
-    if (USE_LLM_PARSER) {
-      try {
-        const trimmedBullets = bullets.slice(0, 12).map(b => b.slice(0, 160));
-        intent = await parseBulletEditIntentLLM(c.env.AI, model, trimmedBullets, userMsg);
-      } catch (e: any) {
-        console.error("[chat bullet-intent LLM] error:", e?.message || e);
+    // Handle general bullet transformation requests (now applies to experience bullets)
+    if ((context === "bullets" || context === "general") && run.phases?.normalize?.experience) {
+      const experience = run.phases.normalize.experience;
+      
+      // Only try AI-based intent extraction if context is "bullets" or user is clearly talking about bullets
+      const isBulletContext = context === "bullets" || /\b(bullet|bullets|job|jobs|experience|work history)\b/i.test(userMsg);
+      
+      let intent = null;
+      if (isBulletContext) {
+        intent = await extractBulletTransformIntent(c.env.AI, model, experience, userMsg);
       }
-    }
-
-    // 2) Fallback heuristics
-    let style: BulletStyle | null = null;
-    let targetIdx: number[] | null = null;
-    let applyAll = false;
-
-    if (intent && intent.intent === "bullet_transform") {
-      style = intent.style ?? detectStyleNL(msgLower);
-      targetIdx = (intent.apply === "all" || (intent.indexes.length === 0)) ? null : intent.indexes;
-      applyAll = intent.apply === "all";
-    } else {
-      style = detectStyleNL(msgLower);
-      targetIdx = parseBulletIndexesNL(msgLower, bullets.length);
-      if (!targetIdx) {
-        const snip = parseQuotedSnippet(userMsg);
-        if (snip) targetIdx = findBulletBySnippetFuzzy(bullets, snip, { threshold: 0.64, maxMatches: 2, minFloor: 0.52 });
+      
+      if (intent && intent.style && intent.targets.length > 0) {
+        const instruction = BULLET_STYLE_INSTRUCTIONS[intent.style];
+        const newExperience = [...experience];
+        let totalBulletsTransformed = 0;
+        const jobDescriptions: string[] = [];
+        
+        try {
+          // Transform bullets for each target
+          for (const target of intent.targets) {
+            const { jobIdx, bulletIndices } = target;
+            const job = experience[jobIdx];
+            
+            if (job.bullets && job.bullets.length > 0) {
+              const bulletsToTransform = bulletIndices.map(i => job.bullets[i]);
+              const rewritten = await transformBulletsBatch(c.env.AI, model, bulletsToTransform, instruction, bulletIndices.map((_, i) => i));
+              
+              const newJob = { ...job, bullets: [...job.bullets] };
+              bulletIndices.forEach((originalIdx: number, newIdx: number) => {
+                newJob.bullets[originalIdx] = rewritten[newIdx] || job.bullets[originalIdx];
+              });
+              
+              newExperience[jobIdx] = newJob;
+              totalBulletsTransformed += bulletIndices.length;
+              
+              // Create job description
+              const jobDesc = jobIdx === 0 ? "first job" : jobIdx === experience.length - 1 ? "last job" : `job ${jobIdx + 1}`;
+              const bulletDesc = bulletIndices.length === 1 
+                ? `bullet ${bulletIndices[0] + 1}` 
+                : bulletIndices.length === job.bullets.length
+                ? "all bullets"
+                : `bullets ${bulletIndices.map(i => i + 1).join(", ")}`;
+              
+              jobDescriptions.push(`${jobDesc} (${bulletDesc})`);
+            }
+          }
+          
+          await user.saveRunPart(run.id, { phases: { normalize: { ...run.phases.normalize, experience: newExperience } } });
+          
+           const description = intent.targets.length === 1 
+             ? jobDescriptions[0]
+             : `all ${experience.length} jobs`;
+           
+           const baseMessage = HUMANIZED_RESPONSES.bulletTransform[intent.style];
+           return reply(`${baseMessage} Updated ${description} (${totalBulletsTransformed} bullets total).`);
+        } catch (e: any) {
+          console.error("[chat bullet-transform] AI intent fail:", e?.message || e);
+          return reply(`I couldn't rewrite those bullets just now. Please try again.`);
+        }
       }
-      applyAll = !targetIdx;
-    }
-
-    if (!style) {
-      // fall through to default Q&A
-    } else {
+      
+      // Fallback to heuristic-based approach
+      const style = detectStyleNL(msgLower);
+      if (style) {
+        // Check for "across all jobs" requests
+        if (/\bacross\s+all\s+jobs?\b/.test(msgLower) || /\ball\s+jobs?\b/.test(msgLower)) {
       const instruction = BULLET_STYLE_INSTRUCTIONS[style];
-      const indices = applyAll ? bullets.map((_, i) => i) : (targetIdx ?? []);
-      if (indices.length === 0) {
-        return reply(`Tell me which bullet(s) to edit (e.g., "shorten bullet 2" or "ATS all bullets").`);
-      }
-
-      const hist = ((run.phases as any)?.bullets_history ?? []) as string[][];
-      const bullets_history = [...hist.slice(-2), bullets];
-
-      let rewritten: string[] = [];
-      try {
-        rewritten = await transformBulletsBatch(c.env.AI, model, bullets, instruction, indices);
+          const newExperience = [...experience];
+          let totalBulletsTransformed = 0;
+          
+          try {
+            // Transform bullets for each job
+            for (let jobIdx = 0; jobIdx < experience.length; jobIdx++) {
+              const job = experience[jobIdx];
+              if (job.bullets && job.bullets.length > 0) {
+                const bulletsToTransform = job.bullets;
+                const rewritten = await transformBulletsBatch(c.env.AI, model, bulletsToTransform, instruction, bulletsToTransform.map((_, i) => i));
+                
+                const newJob = { ...job, bullets: [...job.bullets] };
+                rewritten.forEach((newBullet, idx) => {
+                  newJob.bullets[idx] = newBullet;
+                });
+                
+                newExperience[jobIdx] = newJob;
+                totalBulletsTransformed += job.bullets.length;
+              }
+            }
+            
+             await user.saveRunPart(run.id, { phases: { normalize: { ...run.phases.normalize, experience: newExperience } } });
+             const baseMessage = HUMANIZED_RESPONSES.bulletTransform[style];
+             return reply(`${baseMessage} Updated all bullets across all ${experience.length} jobs (${totalBulletsTransformed} bullets total).`);
+          } catch (e: any) {
+            console.error("[chat bullet-transform] all jobs fail:", e?.message || e);
+            return reply(`I couldn't rewrite all the bullets just now. Please try again.`);
+          }
+        } else {
+          // Try to find a specific job and bullet to transform
+          const targeting = parseJobAndBulletTargeting(msgLower, experience);
+          
+          if (targeting) {
+            const { jobIdx, bulletIndices } = targeting;
+            const job = experience[jobIdx];
+            
+            const instruction = BULLET_STYLE_INSTRUCTIONS[style];
+            const bulletsToTransform = bulletIndices.map(i => job.bullets[i]);
+            
+            try {
+              const rewritten = await transformBulletsBatch(c.env.AI, model, bulletsToTransform, instruction, bulletIndices.map((_, i) => i));
+              
+              const newExperience = [...experience];
+              const newJob = { ...job, bullets: [...job.bullets] };
+              
+              bulletIndices.forEach((originalIdx: number, newIdx: number) => {
+                newJob.bullets[originalIdx] = rewritten[newIdx] || job.bullets[originalIdx];
+              });
+              
+              newExperience[jobIdx] = newJob;
+              
+              // Create a more natural description
+              const jobDesc = jobIdx === 0 ? "first job" : jobIdx === experience.length - 1 ? "last job" : `job ${jobIdx + 1}`;
+              const bulletDesc = bulletIndices.length === 1 
+                ? `bullet ${bulletIndices[0] + 1}` 
+                : bulletIndices.length === job.bullets.length
+                ? "all bullets"
+                : `bullets ${bulletIndices.map(i => i + 1).join(", ")}`;
+              
+               await user.saveRunPart(run.id, { phases: { normalize: { ...run.phases.normalize, experience: newExperience } } });
+               const baseMessage = HUMANIZED_RESPONSES.bulletTransform[style];
+               return reply(`${baseMessage} Updated ${jobDesc}, ${bulletDesc}.`);
       } catch (e: any) {
         console.error("[chat bullet-transform] batch fail:", e?.message || e);
         return reply(`I couldn't rewrite those bullets just now. Please try again.`);
+            }
+          }
+        }
       }
+    }
 
-      const out = bullets.slice();
-      indices.forEach((i, k) => { out[i] = rewritten[k] || bullets[i]; });
-      await user.saveRunPart(run.id, { phases: { bullets: out, bullets_history } });
+    // Handle Experience section bullets
+    if ((context === "experience" || context === "general") && run.phases?.normalize?.experience) {
+      const experience = run.phases.normalize.experience;
+      
+      // Try enhanced natural language parsing first
+      let result = await handleExperienceBulletTransform(c.env.AI, model, experience, userMsg, msgLower, style);
+      
+      // If that fails and we have a style, try LLM-based intent parsing
+      if (!result && style) {
+        result = await handleExperienceBulletTransformLLM(c.env.AI, model, experience, userMsg, style);
+      }
+      
+      if (result) {
+        await user.saveRunPart(run.id, { phases: { normalize: { ...run.phases.normalize, experience: result.experience } } });
+        return reply(result.message);
+      }
+    }
 
-      const where = applyAll ? "all bullets" : `bullet${indices.length>1?"s":""} ${indices.map(i=>i+1).join(", ")}`;
-      return reply(`Applied **${style}** to ${where}.`);
+    // Handle Professional Summary
+    if ((context === "summary" || context === "general") && run.phases?.normalize?.summary) {
+      const result = await handleSummaryTransform(c.env.AI, model, run.phases.normalize.summary, userMsg, msgLower, style);
+      if (result) {
+        await user.saveRunPart(run.id, { phases: { normalize: { ...run.phases.normalize, summary: result.summary } } });
+        return reply(result.message);
+      }
+    }
+  }
+
+  // ---- Section edit intents (skills/summary/certs/experience bullets) -----------
+  if (run && run.phases) {
+    const r = run as RunData;
+    const lowerMsg = userMsg.toLowerCase();
+
+    // Helper: fully-initialized NormalizedData to avoid undefineds
+    const cur = (r.phases as any)?.normalize as Partial<NormalizedData> | undefined;
+    const norm: NormalizedData = {
+      name: cur?.name ?? null,
+      contact: {
+        email: cur?.contact?.email ?? null,
+        phone: cur?.contact?.phone ?? null,
+        location: cur?.contact?.location ?? null,
+        links: Array.isArray(cur?.contact?.links) ? [...cur!.contact!.links].slice(0, 10) : [],
+      },
+      summary: cur?.summary ?? null,
+      education: Array.isArray(cur?.education) ? [...cur!.education] : [],
+      skills: Array.isArray(cur?.skills) ? [...cur!.skills] : [],
+      certifications: Array.isArray(cur?.certifications) ? [...cur!.certifications] : [],
+      experience: Array.isArray(cur?.experience)
+        ? cur!.experience!.map((e: any) => ({
+            title: String(e?.title ?? "").slice(0, 120) || "Role",
+            org: String(e?.org ?? "").slice(0, 160) || "Organization",
+            location: e?.location ? String(e.location).slice(0, 120) : null,
+            start: e?.start ? String(e.start).slice(0, 40) : null,
+            end: e?.end ? String(e.end).slice(0, 40) : null,
+            bullets: Array.isArray(e?.bullets) ? [...e.bullets] : [],
+            skills: Array.isArray(e?.skills) ? [...e.skills] : [],
+          }))
+        : [],
+    };
+
+    // Add skill: "add X to skills"
+    const addSkill = lowerMsg.match(/add\s+["']?(.+?)["']?\s+to\s+skills/);
+    if (addSkill) {
+      const skill = addSkill[1].trim().slice(0, 40);
+      const curSet = new Set(norm.skills.map((s: string) => s.toLowerCase()));
+      if (!curSet.has(skill.toLowerCase())) norm.skills.push(skill);
+      await user.saveRunPart(runId!, { phases: { normalize: norm } });
+      return reply(`Added **${skill}** to Skills.`);
+    }
+
+    // Remove skill: "remove X from skills"
+    const remSkill = lowerMsg.match(/remove\s+["']?(.+?)["']?\s+from\s+skills/);
+    if (remSkill) {
+      const skill = remSkill[1].trim().toLowerCase();
+      norm.skills = norm.skills.filter((s: string) => s.toLowerCase() !== skill);
+      await user.saveRunPart(runId!, { phases: { normalize: norm } });
+      return reply(`Removed **${remSkill[1]}** from Skills.`);
+    }
+
+    // Replace summary: `summary: <new text>` or "update summary to ..."
+    const mSummary = userMsg.match(/(?:^|\b)(?:summary\s*:\s*|update\s+summary\s+to\s+)([\s\S]+)$/i);
+    if (mSummary) {
+      const text = mSummary[1].trim().slice(0, 1200);
+      (norm as any).summary = text;
+      await user.saveRunPart(runId!, { phases: { normalize: norm } });
+      return reply(`Updated **Summary**.`);
+    }
+
+    // Add certification: `add cert: AWS Cloud Practitioner (2023)`
+    const mCert = userMsg.match(/add\s+cert(?:ification)?:\s*([\s\S]+)$/i);
+    if (mCert) {
+      const item = mCert[1].trim().slice(0, 120);
+      (norm as any).certifications = Array.isArray((norm as any).certifications)
+        ? (norm as any).certifications
+        : [];
+      (norm as any).certifications.push(item);
+      await user.saveRunPart(runId!, { phases: { normalize: norm } });
+      return reply(`Added certification: **${item}**.`);
+    }
+
+    // Edit experience bullet: "replace job 1 bullet 2: <new bullet>"
+    const mExp = userMsg.match(/(?:replace|update)\s+job\s+(\d+)\s+bullet\s+(\d+)\s*:\s*([\s\S]+)$/i);
+    if (mExp) {
+      const jobIdx = Math.max(0, parseInt(mExp[1], 10) - 1);
+      const bullIdx = Math.max(0, parseInt(mExp[2], 10) - 1);
+      const newBullet = mExp[3].trim().slice(0, 300);
+
+      if (norm.experience[jobIdx]) {
+        const bulletsArr = Array.isArray(norm.experience[jobIdx].bullets)
+          ? [...norm.experience[jobIdx].bullets]
+          : [];
+        if (bullIdx >= 0 && bullIdx < bulletsArr.length) {
+          bulletsArr[bullIdx] = newBullet;
+          norm.experience[jobIdx].bullets = bulletsArr;
+          await user.saveRunPart(runId!, { phases: { normalize: norm } });
+          return reply(`Updated Job ${jobIdx + 1}, bullet ${bullIdx + 1}.`);
+        }
+      }
     }
   }
 
@@ -368,9 +814,11 @@ app.post("/api/chat", async (c) => {
       messages: [
         { role: "system", content: system },
         { role: "user", content: userMsg }
-      ]
+      ],
+      temperature: 0,
+      max_tokens: 2000
     });
-    const text = (resp?.response ?? resp?.output_text ?? "").toString().trim();
+    const text = toText(resp).trim();
     return reply(text || "I didn’t generate a response.");
   } catch (e: any) {
     console.error("[/api/chat] error:", e?.message || e);
@@ -378,15 +826,212 @@ app.post("/api/chat", async (c) => {
   }
 });
 
-// chatbot endpoints --------------------------------------------------
-// bullet edit endpoints --------------------------------------------------
+/* -------------------- Alternative chat route -------------------- */
+app.post("/api/run/:id/chat", async (c) => {
+  const runId = c.req.param("id");
+  const uid = c.get("uid");
+  const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
+
+  type ChatBody = { message?: string; context?: string };
+  const body = (await c.req.json().catch(() => ({}))) as ChatBody;
+
+  const userMsg = (body.message ?? "").trim();
+  if (!userMsg) return c.json({ ok: false, error: "empty_message" }, 400);
+
+  const run = await user.getRun(runId);
+  if (!run) return c.json({ ok: false, error: "not_found" }, 404);
+
+  // Build context
+  const ctx: string[] = [];
+  ctx.push(
+    `RUN STATUS: ${run.status}`,
+    run.targetRole ? `TARGET ROLE: ${run.targetRole}` : "",
+    run.phases?.requirements ? `REQS: ${JSON.stringify(run.phases.requirements).slice(0, 600)}` : "",
+    run.phases?.draft ? `DRAFT: ${String(run.phases.draft).slice(0, 600)}` : ""
+  );
+
+  // Handle experience bullet edit intents
+  if (run.phases?.normalize?.experience) {
+    const experience = run.phases.normalize.experience;
+    const msgLower = userMsg.toLowerCase();
+    const model = c.env.MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+    // Detect style and apply transform
+    const style = detectStyleNL(msgLower);
+    if (style) {
+      // Check for "across all jobs" requests
+      if (/\bacross\s+all\s+jobs?\b/.test(msgLower) || /\ball\s+jobs?\b/.test(msgLower)) {
+        const instruction = BULLET_STYLE_INSTRUCTIONS[style];
+        const newExperience = [...experience];
+        let totalBulletsTransformed = 0;
+        
+        try {
+          // Transform bullets for each job
+          for (let jobIdx = 0; jobIdx < experience.length; jobIdx++) {
+            const job = experience[jobIdx];
+            if (job.bullets && job.bullets.length > 0) {
+              const bulletsToTransform = job.bullets;
+              const rewritten = await transformBulletsBatch(c.env.AI, model, bulletsToTransform, instruction, bulletsToTransform.map((_, i) => i));
+              
+              const newJob = { ...job, bullets: [...job.bullets] };
+              rewritten.forEach((newBullet, idx) => {
+                newJob.bullets[idx] = newBullet;
+              });
+              
+              newExperience[jobIdx] = newJob;
+              totalBulletsTransformed += job.bullets.length;
+            }
+          }
+          
+          await user.saveRunPart(runId, { phases: { normalize: { ...run.phases.normalize, experience: newExperience } } });
+
+           const baseMessage = HUMANIZED_RESPONSES.bulletTransform[style];
+           const reply = `${baseMessage} Updated all bullets across all ${experience.length} jobs (${totalBulletsTransformed} bullets total).`;
+
+          // Add to chat history
+          const rawHistory = (run?.phases as any)?.chat as unknown;
+          const prior: ChatTurn[] = toChatTurns(rawHistory).slice(-12);
+          const newChat: ChatTurn[] = [
+            ...prior,
+            { role: "user" as const, content: userMsg },
+            { role: "assistant" as const, content: reply }
+          ];
+          await user.saveRunPart(runId, { phases: { chat: newChat } });
+
+          return c.json({ ok: true, reply });
+        } catch (e: any) {
+          console.error("[chat bullet-transform] all jobs fail:", e?.message || e);
+          return c.json({ ok: false, error: "ai_error" }, 500);
+        }
+      } else {
+        const targeting = parseJobAndBulletTargeting(msgLower, experience);
+        if (targeting) {
+          const { jobIdx, bulletIndices } = targeting;
+          const job = experience[jobIdx];
+          
+          const instruction = BULLET_STYLE_INSTRUCTIONS[style];
+          const bulletsToTransform = bulletIndices.map(i => job.bullets[i]);
+          
+          let rewritten: string[] = [];
+          try {
+            rewritten = await transformBulletsBatch(c.env.AI, model, bulletsToTransform, instruction, bulletIndices.map((_, i) => i));
+          } catch (e: any) {
+            console.error("[chat bullet-transform] batch fail:", e?.message || e);
+            return c.json({ ok: false, error: "ai_error" }, 500);
+          }
+
+          const newExperience = [...experience];
+          const newJob = { ...job, bullets: [...job.bullets] };
+          
+          bulletIndices.forEach((originalIdx: number, newIdx: number) => {
+            newJob.bullets[originalIdx] = rewritten[newIdx] || job.bullets[originalIdx];
+          });
+          
+          newExperience[jobIdx] = newJob;
+          
+          // Create a more natural description
+          const jobDesc = jobIdx === 0 ? "first job" : jobIdx === experience.length - 1 ? "last job" : `job ${jobIdx + 1}`;
+          const bulletDesc = bulletIndices.length === 1 
+            ? `bullet ${bulletIndices[0] + 1}` 
+            : bulletIndices.length === job.bullets.length
+            ? "all bullets"
+            : `bullets ${bulletIndices.map(i => i + 1).join(", ")}`;
+          
+          await user.saveRunPart(runId, { phases: { normalize: { ...run.phases.normalize, experience: newExperience } } });
+
+           const baseMessage = HUMANIZED_RESPONSES.bulletTransform[style];
+           const reply = `${baseMessage} Updated ${jobDesc}, ${bulletDesc}.`;
+
+          // Add to chat history
+          const rawHistory = (run?.phases as any)?.chat as unknown;
+          const prior: ChatTurn[] = toChatTurns(rawHistory).slice(-12);
+          const newChat: ChatTurn[] = [
+            ...prior,
+            { role: "user" as const, content: userMsg },
+            { role: "assistant" as const, content: reply }
+          ];
+          await user.saveRunPart(runId, { phases: { chat: newChat } });
+
+          return c.json({ ok: true, reply });
+        }
+      }
+    }
+  }
+
+  // Handle Professional Summary transformations
+  if (run.phases?.normalize?.summary) {
+    const msgLower = userMsg.toLowerCase();
+    const model = c.env.MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+    const style = detectStyleNL(msgLower);
+    
+    const result = await handleSummaryTransform(c.env.AI, model, run.phases.normalize.summary, userMsg, msgLower, style);
+    if (result) {
+      await user.saveRunPart(runId, { phases: { normalize: { ...run.phases.normalize, summary: result.summary } } });
+      
+      // Add to chat history
+      const rawHistory = (run?.phases as any)?.chat as unknown;
+      const prior: ChatTurn[] = toChatTurns(rawHistory).slice(-12);
+      const newChat: ChatTurn[] = [
+        ...prior,
+        { role: "user" as const, content: userMsg },
+        { role: "assistant" as const, content: result.message }
+      ];
+      await user.saveRunPart(runId, { phases: { chat: newChat } });
+
+      return c.json({ ok: true, reply: result.message });
+    }
+  }
+
+  // Default: LLM Q&A
+  const system = [
+    `You are a resume-transformation copilot for government-to-private-sector transitions.`,
+    `Be concise and actionable; suggest bullet rewrites when helpful.`,
+    `Context:`,
+    ctx.filter(Boolean).join("\n")
+  ].join("\n");
+
+  const model = c.env.MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+  try {
+    const resp = await c.env.AI.run(model, {
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: userMsg }
+      ],
+      temperature: 0,
+      max_tokens: 2000
+    });
+    const text = toText(resp).trim();
+    const reply = text || "I didn't generate a response.";
+
+    // Add to chat history
+    const rawHistory = (run?.phases as any)?.chat as unknown;
+    const prior: ChatTurn[] = toChatTurns(rawHistory).slice(-12);
+    const newChat: ChatTurn[] = [
+      ...prior,
+      { role: "user" as const, content: userMsg },
+      { role: "assistant" as const, content: reply }
+    ];
+    await user.saveRunPart(runId, { phases: { chat: newChat } });
+
+    return c.json({ ok: true, reply });
+  } catch (e: any) {
+    console.error("[/api/run/:id/chat] error:", e?.message || e);
+    return c.json({ ok: false, error: "ai_error" }, 500);
+  }
+});
+
+/* -------------------- Bullet edit API -------------------- */
 
 app.post("/api/run/:id/bullets/transform", async (c) => {
   const runId = c.req.param("id");
   const uid = c.get("uid");
   const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
 
-  type Body = { style?: keyof typeof BULLET_STYLE_INSTRUCTIONS; indexes?: number[] };
+  type Body = { 
+    style?: keyof typeof BULLET_STYLE_INSTRUCTIONS; 
+    jobIndex?: number;
+    bulletIndexes?: number[] 
+  };
   const body = (await c.req.json().catch(() => ({}))) as Body;
 
   const style = body.style;
@@ -394,23 +1039,31 @@ app.post("/api/run/:id/bullets/transform", async (c) => {
     return c.json({ ok: false, error: "invalid_style" }, 400);
   }
 
-  const run= (await user.getRun(runId)) as RunData | null;
+  const run = (await user.getRun(runId)) as RunData | null;
   if (!run) return c.json({ ok: false, error: "not_found" }, 400);
 
-  const bullets = (run.phases?.bullets ?? []) as string[];
-  if (!Array.isArray(bullets) || bullets.length === 0) {
+  const experience = run.phases?.normalize?.experience;
+  if (!Array.isArray(experience) || experience.length === 0) {
+    return c.json({ ok: false, error: "no_experience" }, 400);
+  }
+
+  const jobIndex = body.jobIndex ?? 0;
+  if (jobIndex < 0 || jobIndex >= experience.length) {
+    return c.json({ ok: false, error: "invalid_job_index" }, 400);
+  }
+
+  const job = experience[jobIndex];
+  const bullets = job.bullets || [];
+  if (bullets.length === 0) {
     return c.json({ ok: false, error: "no_bullets" }, 400);
   }
 
   const allIndex = bullets.map((_, i) => i);
-  const targetIndex = Array.isArray(body.indexes) && body.indexes.length
-    ? [...new Set(body.indexes.filter(i => Number.isInteger(i) && i >= 0 && i < bullets.length))]
+  const targetIndex = Array.isArray(body.bulletIndexes) && body.bulletIndexes.length
+    ? [...new Set(body.bulletIndexes.filter(i => Number.isInteger(i) && i >= 0 && i < bullets.length))]
     : allIndex;
 
   if (targetIndex.length === 0) return c.json({ ok: false, error: "no_valid_indices" }, 400);
-
-  const history = ((run.phases as any)?.bullets_history ?? []) as string[][];
-  const bullets_history = [...history.slice(-2), bullets];
 
   const model = c.env.MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
   const instruction = BULLET_STYLE_INSTRUCTIONS[style];
@@ -422,160 +1075,173 @@ app.post("/api/run/:id/bullets/transform", async (c) => {
     console.error("[/bullets/transform] batch failed:", e?.message || e);
     return c.json({ ok: false, error: "ai_error" }, 500);
   }
-  const out = bullets.slice();
-  targetIndex.forEach((i, k) => { out[i] = rewritten[k] || bullets[i]; });
 
-  await user.saveRunPart(runId, { phases: { bullets: out, bullets_history } });
+  const newExperience = [...experience];
+  const newJob = { ...job, bullets: [...bullets] };
+  targetIndex.forEach((i, k) => { newJob.bullets[i] = rewritten[k] || bullets[i]; });
+  newExperience[jobIndex] = newJob;
+
+  const currentNormalize = run.phases?.normalize || {
+    name: null,
+    contact: { email: null, phone: null, location: null, links: [] },
+    skills: [],
+    education: [],
+    experience: [],
+    certifications: []
+  };
+  await user.saveRunPart(runId, { phases: { normalize: { ...currentNormalize, experience: newExperience } } });
 
   return c.json({
     ok: true,
     runId,
     style,
+    jobIndex,
     updated: targetIndex.length,
-    indexes: targetIndex,
-    bullets: out
+    bulletIndexes: targetIndex,
+    bullets: newJob.bullets
   });
 });
 
-// bullet edit endpoints --------------------------------------------------
+/* -------------------- LinkedIn Search -------------------- */
 
-// ----------------------------------------
-// ---- NL parsing for bullet transforms via chat ------------------------------
+app.get("/api/linkedin-search/:jobTitle", async (c) => {
+  const jobTitle = c.req.param("jobTitle");
+  const location = c.req.query("location");
+  
+  if (!jobTitle) {
+    return c.json({ ok: false, error: "job_title_required" }, 400);
+  }
+  
+  try {
+    const links = generateLinkedInSearchLinks(jobTitle, location);
+    return c.json({ ok: true, links });
+  } catch (e: any) {
+    console.error("[linkedin-search] error:", e?.message || e);
+    return c.json({ ok: false, error: "search_failed" }, 500);
+  }
+});
 
-// =============================================================================
-// LLM-based intent parsing for bullet edits (chat → style + targets)
-// =============================================================================
+// Export endpoints - PDF only for now
+app.get("/api/run/:id/export.pdf", async (c) => {
+  const runId = c.req.param("id");
+  const uid = c.get("uid");
+  const user = getUserStateClient(c.env.USER_STATE_SQL, uid);
+
+  const run = (await user.getRun(runId)) as RunData | null;
+  if (!run) return c.json({ ok: false, error: "not_found" }, 404);
+
+  const targetRole = run.targetRole || "draft";
+  const date = new Date().toISOString().split('T')[0];
+  const filename = `resume-${targetRole.replace(/[^a-zA-Z0-9]/g, '-')}-${date}.pdf`;
+
+  try {
+    // Import the PDF generator
+    const { generateResumePDF } = await import("./pdfGenerator");
+    
+    // Generate the PDF
+    const pdfBytes = await generateResumePDF(run);
+    
+    return new Response(pdfBytes, {
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Content-Length": pdfBytes.length.toString()
+      }
+    });
+  } catch (e: any) {
+    console.error("[export.pdf] error:", e?.message || e);
+    return c.json({ ok: false, error: "pdf_generation_failed" }, 500);
+  }
+});
+
+
+// Natural language parsing for bullet transformations
+// TODO: maybe move this to a separate utility file
 
 // Feature flag (leave true for MVP; you can gate with an env var later)
-const USE_LLM_PARSER = true as const;
-
-// Style options must match your transform route keys
-type BulletStyle = "short" | "quant" | "lead" | "ats" | "dejargon";
-
-type BulletEditIntent =
-  | { intent: "bullet_transform"; style: BulletStyle | null; indexes: number[]; apply: "all" | "some"; note?: string | null }
-  | { intent: "none" };
-
-function clampIndexes(indexes: unknown, n: number): number[] {
-  const list = Array.isArray(indexes) ? indexes : [];
-  const out = new Set<number>();
-  for (const v of list) {
-    const i = Number(v);
-    if (Number.isInteger(i) && i >= 0 && i < n) out.add(i);
-  }
-  return [...out].sort((a,b)=>a-b);
-}
-
-/**
- * Ask the LLM to parse the user's message into a JSON intent.
- * - bullets: the current bullets for context (numbered), trimmed & capped to reduce tokens
- * - message: the raw user text
- * Returns a BulletEditIntent or null if parsing failed.
- */
-async function parseBulletEditIntentLLM(
-  ai: Env["AI"],
-  model: string,
-  bullets: string[],
-  message: string
-): Promise<BulletEditIntent | null> {
-  // Cap bullets & length to control tokens
-  const maxBullets = 12;
-  const maxLen = 160;
-  const trimmed = bullets.slice(0, maxBullets).map((b, i) => `${i+1}. ${String(b).slice(0, maxLen)}`);
-
-  const system = `You are an intent parser for a resume-bullet editor.
-Return ONLY strict JSON with no prose and no markdown fences.
-Schema:
-{"intent":"bullet_transform"|"none","style":"short"|"quant"|"lead"|"ats"|"dejargon"|null,"indexes":[0..] (0-based),"apply":"all"|"some","note":string|null}
-Rules:
-- If user asks to edit bullets, intent="bullet_transform".
-- Derive "style" from wording, or null if unclear.
-- If the user specifies exact bullets (numbers, ordinals, ranges, or quoted snippets), "indexes" should reflect those (0-based).
-- If the user says "all" or provides no clear indices, set apply="all" and indexes=[].
-- Never return invalid indexes (must be 0..N-1).
-- If not about bullets, return {"intent":"none"} only.`;
-
-  const user = `CURRENT BULLETS (0-based in output):
-${trimmed.join("\n")}
-
-USER MESSAGE:
-${message}
-
-Return ONLY JSON. Example valid replies:
-{"intent":"bullet_transform","style":"short","indexes":[0,2],"apply":"some","note":null}
-{"intent":"bullet_transform","style":"ats","indexes":[],"apply":"all","note":"user said 'all bullets'"}
-{"intent":"none"}`;
-
-  const { json } = await aiJsonWithRetry(ai, model, [
-    { role: "system", content: system },
-    { role: "user", content: user }
-  ], `If your prior reply wasn't valid JSON, now output ONLY strict JSON matching the schema.`);
-
-  // Basic structural guard
-  const intent = json as BulletEditIntent | null;
-  if (!intent || typeof intent !== "object" || typeof (intent as any).intent !== "string") return null;
-
-  // Normalize / clamp
-  if (intent.intent === "bullet_transform") {
-    const n = bullets.length;
-    const clamped = clampIndexes((intent as any).indexes, n);
-    const styleRaw = (intent as any).style;
-    const style = (styleRaw === "short" || styleRaw === "quant" || styleRaw === "lead" || styleRaw === "ats" || styleRaw === "dejargon")
-      ? styleRaw
-      : null;
-    const apply = (intent as any).apply === "all" ? "all" : (clamped.length > 0 ? "some" : "all");
-    return { intent: "bullet_transform", style, indexes: clamped, apply, note: (intent as any).note ?? null };
-  }
-
-  return { intent: "none" };
-}
 
 
-// ----------- fallback
+
+// --- heuristics/fallbacks used in chat bullet edits ---
 const STYLE_ALIASES: Record<string, "short"|"quant"|"lead"|"ats"|"dejargon"> = {
+  // Short/Concise variations
   short: "short", shorten: "short", brief: "short", concise: "short", punchier: "short", tighter: "short",
-  quant: "quant", quantify: "quant", numbers: "quant", metrics: "quant",
+  "more concise": "short", "less wordy": "short", "condensed": "short", "compact": "short",
+  
+  // Quantification variations
+  quant: "quant", quantify: "quant", numbers: "quant", metrics: "quant", "more quantifiable": "quant",
+  "add numbers": "quant", "add metrics": "quant", "add data": "quant", "add statistics": "quant",
+  "with numbers": "quant", "with metrics": "quant", "with data": "quant",
+  
+  // Leadership variations
   lead: "lead", leadership: "lead", owner: "lead", ownership: "lead", executive: "lead",
-  ats: "ats", keyword: "ats", keywords: "ats",
-  dejargon: "dejargon", "de-jargon": "dejargon", "de-jargonify": "dejargon", simplify: "dejargon", "plain english": "dejargon"
+  "more leadership": "lead", "leadership focused": "lead", "executive style": "lead",
+  "management focused": "lead", "team leadership": "lead", "cross-functional": "lead",
+  
+  // ATS/Keywords variations
+  ats: "ats", keyword: "ats", keywords: "ats", "ats friendly": "ats", "keyword rich": "ats",
+  "more keywords": "ats", "industry terms": "ats", "technical terms": "ats",
+  
+  // De-jargon variations
+  dejargon: "dejargon", "de-jargon": "dejargon", "de-jargonify": "dejargon", simplify: "dejargon", "plain english": "dejargon",
+  "less jargon": "dejargon", "simpler language": "dejargon", "plain language": "dejargon",
+  "more accessible": "dejargon", "easier to understand": "dejargon",
+  
+  // General style variations
+  "more professional": "lead", "more technical": "ats", "more impressive": "quant",
+  "sound better": "lead", "sound fancier": "lead", "sound more impressive": "quant",
+  "more impactful": "quant", "stronger": "lead", "more compelling": "quant"
 };
 
 function detectStyleNL(msgLower: string): ("short"|"quant"|"lead"|"ats"|"dejargon") | null {
-  for (const [k, v] of Object.entries(STYLE_ALIASES)) if (msgLower.includes(k)) return v;
-  if (/\b(short|concise|tight|punchy)\b/.test(msgLower)) return "short";
-  if (/\b(quant|metric|number|percent|kpi)\b/.test(msgLower)) return "quant";
-  if (/\b(leader|leadership|own|executive)\b/.test(msgLower)) return "lead";
-  if (/\b(ats|keyword)\b/.test(msgLower)) return "ats";
-  if (/\b(jargon|plain|simplif(y|ied))\b/.test(msgLower)) return "dejargon";
+  // Check exact matches first (longer phrases)
+  for (const [k, v] of Object.entries(STYLE_ALIASES)) {
+    if (msgLower.includes(k)) return v;
+  }
+  
+  // Fallback to word-based detection
+  if (/\b(short|concise|tight|punchy|brief|condensed|compact)\b/.test(msgLower)) return "short";
+  if (/\b(quant|metric|number|percent|kpi|data|statistics|measure|count)\b/.test(msgLower)) return "quant";
+  if (/\b(leader|leadership|own|executive|manage|direct|oversee|supervise)\b/.test(msgLower)) return "lead";
+  if (/\b(ats|keyword|technical|industry|professional)\b/.test(msgLower)) return "ats";
+  if (/\b(jargon|plain|simplif(y|ied)|accessible|understandable)\b/.test(msgLower)) return "dejargon";
+  
+  // General improvement words
+  if (/\b(better|improve|enhance|stronger|impressive|compelling|impactful)\b/.test(msgLower)) {
+    // Default to leadership style for general improvements
+    return "lead";
+  }
+  
   return null;
 }
 
 function parseBulletIndexesNL(msgLower: string, n: number): number[] | null {
   const out = new Set<number>();
-
-  // 1-3 / 2–4 ranges
+  
+  // Range patterns: "bullets 1-3", "bullet 2-4"
   for (const m of msgLower.matchAll(/\bbullets?\s*(\d+)\s*[-–]\s*(\d+)\b/g)) {
     const a = Math.max(1, parseInt(m[1], 10)), b = Math.min(n, parseInt(m[2], 10));
     for (let x = Math.min(a,b); x <= Math.max(a,b); x++) out.add(x-1);
   }
-  // bullet 2 / #3
+  
+  // Single bullet patterns: "bullet 2", "bullet #3"
   for (const m of msgLower.matchAll(/\bbullet(?:\s*#)?\s*(\d+)\b/g)) {
     const v = parseInt(m[1], 10); if (v>=1 && v<=n) out.add(v-1);
   }
-  // first/second/third/last
+  
+  // Ordinal patterns: "first", "second", "third", "last"
   if (/\bfirst\b/.test(msgLower) && n>0) out.add(0);
   if (/\bsecond\b/.test(msgLower) && n>1) out.add(1);
   if (/\bthird\b/.test(msgLower) && n>2) out.add(2);
   if (/\blast\b/.test(msgLower) && n>0) out.add(n-1);
 
-  // first two/three
+  // Multiple ordinals: "first two", "last three"
   const firstN = msgLower.match(/\bfirst\s+(two|three|four|five|2|3|4|5)\b/);
   if (firstN) {
     const map: Record<string, number> = { two:2, three:3, four:4, five:5 };
     const v = Number.isFinite(Number(firstN[1])) ? Number(firstN[1]) : (map[firstN[1]] ?? 0);
     for (let i=0; i<Math.min(v,n); i++) out.add(i);
   }
-  // last two/three
   const lastN = msgLower.match(/\blast\s+(two|three|four|five|2|3|4|5)\b/);
   if (lastN) {
     const map: Record<string, number> = { two:2, three:3, four:4, five:5 };
@@ -587,39 +1253,371 @@ function parseBulletIndexesNL(msgLower: string, n: number): number[] | null {
   return arr.length ? arr : null;
 }
 
-// Small fuzzy matcher (Levenshtein-based) for quoted snippet targeting
-function normText(s: string) { return s.toLowerCase().replace(/\s+/g, " ").trim(); }
-function lev(a: string, b: string): number {
-  const m=a.length, n=b.length; if (!m) return n; if (!n) return m;
-  const prev = new Array(n+1); for (let j=0;j<=n;j++) prev[j]=j;
-  for (let i=1;i<=m;i++){ const cur=[i]; for(let j=1;j<=n;j++){
-    const cost = a.charCodeAt(i-1)===b.charCodeAt(j-1)?0:1;
-    cur[j]=Math.min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost);
-  } for(let j=0;j<=n;j++) prev[j]=cur[j]; }
-  return prev[n];
+// Enhanced function to parse job and bullet targeting from natural language
+function parseJobAndBulletTargeting(msgLower: string, experience: any[]): { jobIdx: number; bulletIndices: number[] } | null {
+  // Check for "across all jobs" requests first
+  if (/\bacross\s+all\s+jobs?\b/.test(msgLower) || /\ball\s+jobs?\b/.test(msgLower)) {
+    // For now, we'll handle this by targeting the first job and letting the caller handle multiple jobs
+    // This is a limitation we'll address by calling the function multiple times
+    return { jobIdx: 0, bulletIndices: experience[0]?.bullets?.map((_: any, i: number) => i) || [] };
+  }
+  
+  // Look for job references
+  let jobIdx = -1;
+  
+  // Direct job references: "job 1", "first job", "last job", "job 2"
+  const jobMatch = msgLower.match(/job\s+(\d+)/);
+  if (jobMatch) {
+    jobIdx = parseInt(jobMatch[1], 10) - 1;
+  } else if (/\bfirst\s+job\b/.test(msgLower) || /\bjob\s+1\b/.test(msgLower)) {
+    jobIdx = 0;
+  } else if (/\blast\s+job\b/.test(msgLower)) {
+    jobIdx = experience.length - 1;
+  } else if (/\bcurrent\s+job\b/.test(msgLower) || /\bmost\s+recent\s+job\b/.test(msgLower)) {
+    jobIdx = 0; // Most recent is typically first
+  }
+  
+  // If no specific job mentioned, try to infer from context
+  if (jobIdx === -1) {
+    // If user mentions "the" job or just talks about bullets, assume first job
+    if (/\bthe\s+(job|position|role)\b/.test(msgLower) || /\bbullet/.test(msgLower)) {
+      jobIdx = 0;
+    } else {
+      return null; // Can't determine which job
+    }
+  }
+  
+  if (jobIdx < 0 || jobIdx >= experience.length) return null;
+  
+  const job = experience[jobIdx];
+  if (!job.bullets || job.bullets.length === 0) return null;
+  
+  // Parse bullet targeting
+  const bulletIndices = parseBulletIndexesNL(msgLower, job.bullets.length);
+  
+  // If no specific bullets mentioned, apply to all bullets in the job
+  const finalBulletIndices = bulletIndices || job.bullets.map((_: any, i: number) => i);
+  
+  return { jobIdx, bulletIndices: finalBulletIndices };
 }
-function sim(a: string,b:string){ a=normText(a); b=normText(b); if(!a||!b) return 0; const d=lev(a,b); const L=Math.max(a.length,b.length); return L?1-d/L:0; }
 
-function parseQuotedSnippet(msg: string): string | null {
-  const m = msg.match(/["“](.+?)["”]/);
-  return m ? m[1].slice(0, 160) : null;
+
+// Helper function to handle experience bullet transformations
+async function handleExperienceBulletTransform(
+  ai: Env["AI"],
+  model: string,
+  experience: any[],
+  _userMsg: string,
+  msgLower: string,
+  style: BulletStyle | null
+): Promise<{ experience: any[]; message: string } | null> {
+  if (!style) return null;
+
+  // Use enhanced targeting to parse job and bullet indices
+  const targeting = parseJobAndBulletTargeting(msgLower, experience);
+  if (!targeting) return null;
+  
+  const { jobIdx, bulletIndices } = targeting;
+  const job = experience[jobIdx];
+  
+  if (bulletIndices.length === 0) return null;
+  
+  const instruction = BULLET_STYLE_INSTRUCTIONS[style];
+  const bulletsToTransform = bulletIndices.map(i => job.bullets[i]);
+  
+  try {
+    const rewritten = await transformBulletsBatch(ai, model, bulletsToTransform, instruction, bulletIndices.map((_, i) => i));
+    
+    const newExperience = [...experience];
+    const newJob = { ...job, bullets: [...job.bullets] };
+    
+    bulletIndices.forEach((originalIdx: number, newIdx: number) => {
+      newJob.bullets[originalIdx] = rewritten[newIdx] || job.bullets[originalIdx];
+    });
+    
+    newExperience[jobIdx] = newJob;
+    
+    // Create a more natural description
+    const jobDesc = jobIdx === 0 ? "first job" : jobIdx === experience.length - 1 ? "last job" : `job ${jobIdx + 1}`;
+    const bulletDesc = bulletIndices.length === 1 
+      ? `bullet ${bulletIndices[0] + 1}` 
+      : bulletIndices.length === job.bullets.length
+      ? "all bullets"
+      : `bullets ${bulletIndices.map(i => i + 1).join(", ")}`;
+    
+    return {
+       experience: newExperience,
+       message: `${HUMANIZED_RESPONSES.bulletTransform[style]} Updated ${jobDesc}, ${bulletDesc}.`
+     };
+  } catch (e: any) {
+    console.error("[experience bullet transform] error:", e?.message || e);
+    return null;
+  }
 }
 
-function findBulletBySnippetFuzzy(
-  bullets: string[],
-  snippet: string,
-  opts?: { threshold?: number; maxMatches?: number; minFloor?: number }
-): number[] | null {
-  const th = opts?.threshold ?? 0.64, cap = opts?.maxMatches ?? 2, floor = opts?.minFloor ?? 0.52;
-  const scores = bullets.map((b,i)=>({i,s:sim(snippet,b)})).sort((a,b)=>b.s-a.s);
-  const above = scores.filter(x=>x.s>=th).slice(0,cap).map(x=>x.i);
-  if (above.length) return above;
-  return scores[0]?.s >= floor ? [scores[0].i] : null;
+// Helper function to handle summary transformations
+async function handleSummaryTransform(
+  ai: Env["AI"],
+  model: string,
+  summary: string,
+  _userMsg: string,
+  _msgLower: string,
+  style: BulletStyle | null
+): Promise<{ summary: string; message: string } | null> {
+  if (!style) return null;
+  
+  const instruction = BULLET_STYLE_INSTRUCTIONS[style];
+  
+  try {
+    const response = await ai.run(model, {
+      messages: [
+        { role: "system", content: "You rewrite professional summaries according to an instruction. Return only the rewritten summary, no additional text." },
+        { role: "user", content: `INSTRUCTION: ${instruction}\n\nCURRENT SUMMARY:\n${summary}` }
+      ],
+      temperature: 0,
+      max_tokens: 800
+    });
+    
+     const rewritten = toText(response).trim();
+     if (rewritten && rewritten !== summary) {
+       return {
+         summary: rewritten,
+         message: HUMANIZED_RESPONSES.summaryTransform[style]
+       };
+     }
+  } catch (e: any) {
+    console.error("[summary transform] error:", e?.message || e);
+  }
+  
+  return null;
 }
 
-// ---------------------------------------
+// LLM-based intent parser for complex natural language requests
+async function handleExperienceBulletTransformLLM(
+  ai: Env["AI"],
+  model: string,
+  experience: any[],
+  userMsg: string,
+  style: BulletStyle
+): Promise<{ experience: any[]; message: string } | null> {
+  try {
+    // Build context for the LLM
+    const experienceContext = experience.map((job, idx) => {
+      const bullets = job.bullets || [];
+      return `Job ${idx + 1}: ${job.title} at ${job.org}
+Bullets:
+${bullets.map((bullet: string, i: number) => `  ${i + 1}. ${bullet}`).join('\n')}`;
+    }).join('\n\n');
 
-// AI smoke test
+    const systemPrompt = `You are an intent parser for resume bullet editing. Parse the user's request and return ONLY valid JSON.
+
+Schema:
+{
+  "jobIndex": number (0-based index of the job to edit),
+  "bulletIndices": number[] (0-based indices of bullets to edit),
+  "confidence": number (0-1, how confident you are in the parsing)
+}
+
+Rules:
+- If user says "first job" or "current job", use jobIndex: 0
+- If user says "last job", use jobIndex: ${experience.length - 1}
+- If user says "job 2", use jobIndex: 1
+- For bullets: "first bullet" = 0, "second bullet" = 1, "last bullet" = last index
+- If user says "all bullets" or doesn't specify, include all bullet indices
+- Only return valid indices (jobIndex 0-${experience.length - 1}, bulletIndices 0-${Math.max(...experience.map(j => (j.bullets || []).length - 1))})
+- If you can't parse the request clearly, return confidence: 0`;
+
+    const userPrompt = `EXPERIENCE CONTEXT:
+${experienceContext}
+
+USER REQUEST: "${userMsg}"
+
+Return ONLY the JSON response.`;
+
+    const response = await ai.run(model, {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ],
+      temperature: 0,
+      max_tokens: 200
+    });
+
+    const text = toText(response).trim();
+    const parsed = tryParseJson(text);
+    
+    if (!parsed || typeof parsed.jobIndex !== 'number' || !Array.isArray(parsed.bulletIndices) || parsed.confidence < 0.5) {
+      return null;
+    }
+
+    const jobIdx = parsed.jobIndex;
+    const bulletIndices = parsed.bulletIndices;
+    
+    if (jobIdx < 0 || jobIdx >= experience.length) return null;
+    
+    const job = experience[jobIdx];
+    if (!job.bullets || job.bullets.length === 0) return null;
+    
+    // Validate bullet indices
+    const validBulletIndices = bulletIndices.filter((i: number) => i >= 0 && i < job.bullets.length);
+    if (validBulletIndices.length === 0) return null;
+    
+    const instruction = BULLET_STYLE_INSTRUCTIONS[style];
+    const bulletsToTransform = validBulletIndices.map((i: number) => job.bullets[i]);
+    
+    const rewritten = await transformBulletsBatch(ai, model, bulletsToTransform, instruction, validBulletIndices.map((_: number, i: number) => i));
+    
+    const newExperience = [...experience];
+    const newJob = { ...job, bullets: [...job.bullets] };
+    
+    validBulletIndices.forEach((originalIdx: number, newIdx: number) => {
+      newJob.bullets[originalIdx] = rewritten[newIdx] || job.bullets[originalIdx];
+    });
+    
+     newExperience[jobIdx] = newJob;
+     
+     // Create a more natural description
+     const jobDesc = jobIdx === 0 ? "first job" : jobIdx === experience.length - 1 ? "last job" : `job ${jobIdx + 1}`;
+     const bulletDesc = validBulletIndices.length === 1 
+       ? `bullet ${validBulletIndices[0] + 1}` 
+       : validBulletIndices.length === job.bullets.length
+       ? "all bullets"
+       : `bullets ${validBulletIndices.map((i: number) => i + 1).join(", ")}`;
+     
+  return {
+       experience: newExperience,
+       message: `${HUMANIZED_RESPONSES.bulletTransform[style]} Updated ${jobDesc}, ${bulletDesc}.`
+     };
+  } catch (e: any) {
+    console.error("[LLM experience bullet transform] error:", e?.message || e);
+    return null;
+  }
+}
+
+// AI-based intent extraction for bullet transformation requests
+async function extractBulletTransformIntent(
+  ai: Env["AI"],
+  model: string,
+  experience: any[],
+  userMsg: string
+): Promise<{
+  style: BulletStyle | null;
+  targets: Array<{ jobIdx: number; bulletIndices: number[] }>;
+  confidence: number;
+} | null> {
+  try {
+    // Build context for the LLM
+    const experienceContext = experience.map((job, idx) => {
+      const bullets = job.bullets || [];
+      return `Job ${idx + 1}: ${job.title} at ${job.org}
+Bullets:
+${bullets.map((bullet: string, i: number) => `  ${i + 1}. ${bullet}`).join('\n')}`;
+    }).join('\n\n');
+
+    const systemPrompt = `You are an expert intent parser for resume bullet editing. Analyze the user's request and extract the transformation intent.
+
+Available transformation styles:
+- "quant": Make bullets more quantifiable with numbers, percentages, metrics
+- "short": Make bullets more concise and punchy
+- "lead": Make bullets more leadership-focused with strong action verbs
+- "ats": Make bullets more ATS-friendly with keywords
+- "dejargon": Remove jargon and make bullets clearer
+
+Return ONLY valid JSON with this schema:
+{
+  "style": "quant" | "short" | "lead" | "ats" | "dejargon" | null,
+  "targets": [
+    {
+      "jobIdx": number (0-based job index),
+      "bulletIndices": number[] (0-based bullet indices)
+    }
+  ],
+  "confidence": number (0-1, how confident you are)
+}
+
+Rules:
+- If user says "across all jobs" or "all jobs", create targets for ALL jobs
+- If user says "first job", use jobIdx: 0
+- If user says "last job", use jobIdx: ${experience.length - 1}
+- If user says "job 2", use jobIdx: 1
+- For bullets: "first bullet" = 0, "second bullet" = 1, "last bullet" = last index
+- If user says "all bullets" or doesn't specify bullets, include all bullet indices for that job
+- If no clear style detected, return style: null
+- Only return valid indices (jobIdx 0-${experience.length - 1})
+- If confidence < 0.5, the parsing is unreliable`;
+
+    const userPrompt = `EXPERIENCE CONTEXT:
+${experienceContext}
+
+USER REQUEST: "${userMsg}"
+
+Analyze the request and return the JSON response.`;
+
+    const response = await ai.run(model, {
+    messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+    ],
+    temperature: 0,
+      max_tokens: 300
+    });
+
+    const text = toText(response).trim();
+    const parsed = tryParseJson(text);
+    
+    if (parsed && typeof parsed === "object" && 
+        typeof parsed.confidence === "number" &&
+        parsed.confidence > 0.5 &&
+        Array.isArray(parsed.targets)) {
+      
+      // Validate and clean the targets
+      const validTargets = parsed.targets
+        .filter((target: any) => 
+          typeof target === "object" &&
+          typeof target.jobIdx === "number" &&
+          Array.isArray(target.bulletIndices)
+        )
+        .map((target: any) => {
+          const jobIdx = Math.max(0, Math.min(target.jobIdx, experience.length - 1));
+          const job = experience[jobIdx];
+          const maxBulletIdx = (job.bullets || []).length - 1;
+          
+          const bulletIndices = target.bulletIndices
+            .filter((idx: number) => typeof idx === "number" && idx >= 0 && idx <= maxBulletIdx)
+            .sort((a: number, b: number) => a - b);
+          
+          return { jobIdx, bulletIndices };
+        })
+        .filter((target: any) => target.bulletIndices.length > 0);
+      
+      if (validTargets.length > 0) {
+        return {
+          style: parsed.style || null,
+          targets: validTargets,
+          confidence: parsed.confidence
+        };
+      }
+    }
+    
+    return null;
+  } catch (e: any) {
+    console.error("[AI intent extraction] error:", e?.message || e);
+    return null;
+  }
+}
+
+// Helper function to try parsing JSON
+function tryParseJson(text: string): any {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+
+
+/* -------------------- AI smoke test -------------------- */
 app.get("/api/ai-test", async (c) => {
   const model = c.env.MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
   const messages = [
@@ -627,8 +1625,8 @@ app.get("/api/ai-test", async (c) => {
     { role: 'user', content: 'What is this application?' }
   ];
   try {
-    const resp = await c.env.AI.run(model, { messages });
-    const text = normalizeAiString(resp);
+    const resp = await c.env.AI.run(model, { messages, temperature: 0, max_tokens: 200 });
+    const text = toText(resp);
     return c.json({ ok: true, model, text });
   } catch (e: any) {
     console.error("[/api/ai-test] error:", e?.message || e);
@@ -638,320 +1636,14 @@ app.get("/api/ai-test", async (c) => {
 
 export default app;
 
-/* -------------------- Step Helpers -------------------- */
-function assertAI(ai: Env["AI"]) {
-  if (!ai || typeof (ai as any).run !== "function") {
-    throw new Error(
-      'Workers AI binding missing. Ensure wrangler.json has { "ai": { "binding": "AI" } } and call helpers with c.env.AI.'
-    );
-  }
-}
-
+// Utility functions
 function randomId(): string {
+  // Generate a random ID for runs
   const b = new Uint8Array(8);
   crypto.getRandomValues(b);
   return Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
 }
 
-/**
- * AI-backed resume/CV normalizer (de-identified few-shot).
- * Returns a superset for forward use AND a `jobs` mirror for back-compat.
- */
-async function normalizeResume(
-  ai: Env["AI"],
-  model: string,
-  resumeText: string,
-  backgroundText?: string
-): Promise<{
-  name: string | null;
-  contact: { email: string | null; phone: string | null; location: string | null; links: string[] };
-  education: Array<{ degree: string; field: string | null; institution: string; year: string | null }>;
-  skills: string[];
-  experience: Array<{
-    title: string; org: string; location: string | null; start: string | null; end: string | null;
-    bullets: string[]; skills: string[]
-  }>;
-  jobs: Array<{ title?: string; org?: string; start?: string | null; end?: string | null; location?: string | null; bullets?: string[]; text?: string }>;
-}> {
-  const input = String(resumeText || "").slice(0, 12000);
-  const bg    = String(backgroundText || "").slice(0, 4000);
-
-  if (!input && !bg) {
-    return {
-      name: null, contact: { email: null, phone: null, location: null, links: [] },
-      education: [], skills: [], experience: [], jobs: []
-    };
-  }
-
-  const system = [
-    "You extract resume/CV information into STRICT JSON. Output ONLY JSON (no prose, no markdown).",
-    "Schema:",
-    '{"name":"string|null","contact":{"email":"string|null","phone":"string|null","location":"string|null","links":["string"]},"education":[{"degree":"string","field":"string|null","institution":"string","year":"string|null"}],"skills":["string"],"experience":[{"title":"string","org":"string","location":"string|null","start":"string|null","end":"string|null","bullets":["string"],"skills":["string"]}]}',
-    "Rules:",
-    "- Always include all keys shown above.",
-    "- Use concise bullets (<= 30 words each).",
-    "- Normalize skills to lowercase single terms/short phrases; dedupe.",
-    "- If data is missing, use null or empty arrays; do not invent data.",
-    "- Prefer ISO-like ranges (e.g., '2019-06') or year-only; if unclear, return null.",
-    "- Contact links: include URLs (LinkedIn/portfolio) if present; else empty array."
-  ].join("\n");
-
-  // De-identified few-shot (no real names or orgs)
-  const fewShotUser1 = [
-    "BACKGROUND:",
-    "Public-sector researcher transitioning to industry data roles; focus on analytics and evaluation.",
-    "RESUME:",
-    "Education: Ph.D. in Behavioral Science (2016); B.S. in Marketing (1989).",
-    "Experience: Senior Researcher (2022–present) – led adolescent health projects; Policy Analyst (2017–2018).",
-    "Skills: sql, data analysis, program evaluation, dashboards."
-  ].join("\n");
-
-  const fewShotAssistant1 = JSON.stringify({
-    name: "Candidate Name",
-    contact: { email: null, phone: null, location: "Atlanta, GA", links: [] },
-    education: [
-      { degree: "Ph.D.", field: "Behavioral Science", institution: "University", year: "2016" },
-      { degree: "B.S.", field: "Marketing", institution: "University", year: "1989" }
-    ],
-    skills: ["sql","data analysis","program evaluation","dashboards"],
-    experience: [
-      { title: "Senior Researcher", org: "Public Health Agency", location: "Atlanta, GA", start: "2022", end: null,
-        bullets: ["led adolescent health research and evaluation projects","delivered insights to inform policy"],
-        skills: ["public health","evaluation","data analysis"]},
-      { title: "Policy Analyst", org: "Education Nonprofit", location: "Atlanta, GA", start: "2017", end: "2018",
-        bullets: ["managed policy initiatives and multi-sector partnerships"], skills: ["partnerships","policy analysis"]}
-    ]
-  }, null, 0);
-
-  const user = [
-    "BACKGROUND:",
-    bg || "(none)",
-    "",
-    "RESUME:",
-    input
-  ].join("\n");
-
-  const { json, text } = await aiJsonWithRetry(ai, model, [
-    { role: "system",    content: system },
-    { role: "user",      content: fewShotUser1 },
-    { role: "assistant", content: fewShotAssistant1 },
-    { role: "user",      content: user }
-  ], 'If your prior reply was not valid JSON, respond now with ONLY the strict JSON schema filled (no markdown).');
-
-  if (!json) {
-    console.warn("[normalizeResume] AI parse returned no JSON. AI text preview:", String(text ?? "").slice(0, ));
-  }
-  // Defensive shaping with back-compat mirror
-  const j = json && typeof json === "object" ? json : {};
-  const name: string | null = (j?.name ?? null) as (string | null);
-
-  const contact = {
-    email: j?.contact?.email ?? null,
-    phone: j?.contact?.phone ?? null,
-    location: j?.contact?.location ?? null,
-    links: Array.isArray(j?.contact?.links) ? (j.contact.links as any[]).slice(0, 10).map((x) => String(x).slice(0, 200)) : []
-  };
-
-  const education = Array.isArray(j?.education) ? (j.education as any[]).slice(0, 20).map((e) => ({
-    degree: String(e?.degree ?? "").slice(0, 120) || "Degree",
-    field: e?.field ? String(e.field).slice(0, 160) : null,
-    institution: String(e?.institution ?? "").slice(0, 200) || "Institution",
-    year: e?.year ? String(e.year).slice(0, 10) : null
-  })) : [];
-
-  const skills = Array.isArray(j?.skills)
-    ? [...new Set((j.skills as any[]).map((s) => String(s).toLowerCase().trim()).filter(Boolean))].slice(0, 200)
-    : [];
-
-  const experience = Array.isArray(j?.experience) ? (j.experience as any[]).slice(0, 40).map((r) => ({
-    title: String(r?.title ?? "").slice(0, 120) || "Role",
-    org: String(r?.org ?? "").slice(0, 160) || "Organization",
-    location: r?.location ? String(r.location).slice(0, 120) : null,
-    start: r?.start ? String(r.start).slice(0, 40) : null,
-    end: r?.end ? String(r.end).slice(0, 40) : null,
-    bullets: Array.isArray(r?.bullets) ? (r.bullets as any[]).slice(0, 12).map((b) => String(b).slice(0, 260)) : [],
-    skills: Array.isArray(r?.skills)
-      ? [...new Set((r.skills as any[]).map((s) => String(s).toLowerCase().trim()).filter(Boolean))].slice(0, 40)
-      : []
-  })) : [];
-
-  // Back-compat mirror for any code still expecting "jobs"
-  const jobs = experience.map((r) => ({
-    title: r.title, org: r.org, start: r.start, end: r.end, location: r.location, bullets: r.bullets
-  }));
-
-  return { name, contact, education, skills, experience, jobs };
-}
-
-function normalizeAiString(resp: any): string {
-  const rawAny = resp?.response ?? resp?.output_text ?? resp?.result ?? resp;
-  if (typeof rawAny === "string") return rawAny.trim();
-  try { return JSON.stringify(rawAny ?? ""); } catch { return ""; }
-}
-
-function stripFences(s: string) { return s.replace(/```json|```/g, "").trim(); }
-function tryParseJson(s: string): any { try { return JSON.parse(stripFences(s)); } catch { return null; } }
-
-async function aiJsonWithRetry(ai: Env["AI"], model: string, messages: any[], parseHint?: string): Promise<{text: string, json: any}> {
-  const t0 = Date.now();
-  // request deterministic output and allow a larger reply
-  const run = async (msgs: any[]) => ai.run(model, { messages: msgs, temperature: 0, max_output_tokens: 10000 });
-  let resp = await run(messages);
-  let text = normalizeAiString(resp);
-  let json = tryParseJson(text);
-
-  if (!json && parseHint) {
-    const retryMsgs = [ messages[0], { role: "system", content: parseHint }, ...messages.slice(1) ];
-    resp = await run(retryMsgs);
-    text = normalizeAiString(resp);
-    json = tryParseJson(text);
-  }
-
-  // salvage attempt: if top-level parse failed, try to extract the first {...} JSON substring
-  if (!json && typeof text === "string") {
-    try {
-      const start = text.indexOf("{");
-      const endCandidates = [];
-      for (let i = start; i < Math.min(text.length, start + 4000); i++) {
-        if (text[i] === "}") endCandidates.push(i);
-      }
-      for (const end of endCandidates.reverse()) {
-        const sub = text.slice(start, end + 1);
-        const p = tryParseJson(sub);
-        if (p) { json = p; text = sub; break; }
-      }
-    } catch { /* ignore salvage errors */ }
-  }
-
-  console.log("[aiJsonWithRetry] ms=", Date.now() - t0, "len=", String(text ?? "").length);
-  return { text, json };
-}
-
-async function proposeRoles(ai: Env["AI"], model: string, background: string, resumeJson: unknown):
-  Promise<{ candidates: RoleCandidate[]; raw: string }> {
-  assertAI(ai);
-
-  const sys = `You propose realistic next-step private-sector roles for a person coming from government work.
-Only output JSON: {"candidates":[{id,title,level?,rationale,confidence}]} with confidence 0..1 and rationale <= 40 words.`;
-  const usr = `BACKGROUND:
-${background}
-
-RESUME_JSON:
-${JSON.stringify(resumeJson).slice(0, 4000)}`;
-
-  const parseHint = `IF your last response was not strict JSON, now respond ONLY strict JSON matching:
-{"candidates":[{"id":"string","title":"string","level?":"string","rationale":"string","confidence":0.0}]}
-No prose.`;
-
-  const { text, json } = await aiJsonWithRetry(ai, model, [
-    { role: "system", content: sys },
-    { role: "user",  content: usr }
-  ], parseHint);
-
-  let out: RoleCandidate[] = [];
-  const parsed = json || {};
-  if (Array.isArray(parsed?.candidates)) {
-    out = parsed.candidates.slice(0, 10).map((c: any, i: number) => ({
-      id: String(c?.id ?? `role-${i + 1}`),         // force string IDs
-      title: String(c?.title ?? "").slice(0, 80),
-      level: c?.level ? String(c.level).slice(0, 20) : undefined,
-      rationale: String(c?.rationale ?? "").slice(0, 240),
-      confidence: Math.max(0, Math.min(1, Number(c?.confidence ?? 0.6))),
-    }));
-  }
-
-  if (out.length === 0) {
-    console.warn("[proposeRoles] empty list -> fallback candidates used");
-    out = [
-      { id: "fallback-1", title: "Data Analyst", level: "IC2", rationale: "SQL/Python analysis aligns with background.", confidence: 0.65 },
-      { id: "fallback-2", title: "Business Intelligence Analyst", rationale: "Dashboarding/KPI work fits.", confidence: 0.6 },
-      { id: "fallback-3", title: "Data Engineer", rationale: "ETL/data pipeline experience.", confidence: 0.55 }
-    ];
-  }
-
-  return { candidates: out, raw: text };
-}
-
-async function generateShortJD(ai: Env["AI"], model: string, title: string): Promise<string> {
-  assertAI(ai);
-  const sys = `Write a concise job description (60-120 words) for the given role. No preamble, plain text.`;
-  const usr = `ROLE TITLE: ${title}`;
-  const r = await ai.run(model, { messages: [
-    { role: "system", content: sys },
-    { role: "user",  content: usr }
-  ]});
-  return normalizeAiString(r);
-}
-
-async function extractRequirements(ai: Env["AI"], model: string, title: string, jd: string):
-  Promise<{ must_have: string[]; nice_to_have: string[] }> {
-  assertAI(ai);
-  const sys = `Extract requirements {must_have[], nice_to_have[]} from the job description.
-Return strict JSON with concise skill/tech phrases.`;
-  const usr = `TITLE: ${title}
-
-JOB DESCRIPTION:
-${jd}`;
-
-  const { text, json } = await aiJsonWithRetry(ai, model, [
-    { role: "system", content: sys },
-    { role: "user",  content: usr }
-  ], `If prior response wasn't valid JSON, now output ONLY strict JSON {"must_have":[],"nice_to_have":[]}.`);
-
-  if (json && Array.isArray(json.must_have) && Array.isArray(json.nice_to_have)) return json;
-  console.warn("[extractRequirements] bad JSON, returning empty lists. Raw:", (text || "").slice(0, 160));
-  return { must_have: [], nice_to_have: [] };
-}
-
-async function mapTransferable(_resumeJson: unknown, reqs: { must_have: string[]; nice_to_have: string[] }): Promise<unknown> {
-  return {
-    mapping: (reqs.must_have ?? []).map((m: string) => ({
-      requirement: m,
-      matched_skills: [],
-      evidence: []
-    }))
-  };
-}
-
-async function rewriteBullets(ai: Env["AI"], model: string, mapping: unknown, title: string): Promise<string[]> {
-  assertAI(ai);
-  const sys = `Rewrite resume bullets tailored to the role. 3-6 bullets. Strong verbs, quantification, industry phrasing. Return each bullet as a line prefixed with "- ".`;
-  const usr = `ROLE: ${title}
-MAPPING:
-${JSON.stringify(mapping).slice(0, 4000)}`;
-  const r = await ai.run(model, { messages: [
-    { role: "system", content: sys },
-    { role: "user",  content: usr }
-  ]});
-  const text = normalizeAiString(r);
-  return String(text)
-    .split(/\r?\n/)
-    .map((s: string) => s.replace(/^\s*-\s*/, "").trim())
-    .filter((s: string) => s.length > 0)
-    .slice(0, 8);
-}
-
-async function scoreSkills(_mapping: unknown): Promise<{ skill: string; score: number }[]> {
-  return [{ skill: "Data Analysis", score: 72 }, { skill: "SQL", score: 68 }];
-}
-
-async function assembleDraft(ai: Env["AI"], model: string, input: {
-  bullets: string[]; requirements: any; mapping: any; background?: string; title: string
-}): Promise<string> {
-  assertAI(ai);
-  const sys = `Assemble a role-tailored resume as plain text sections: Summary, Skills, Experience (use provided bullets), Education (placeholder).`;
-  const usr = `TITLE: ${input.title}
-BACKGROUND: ${input.background ?? ""}
-BULLETS: ${JSON.stringify(input.bullets)}
-REQUIREMENTS: ${JSON.stringify(input.requirements)}
-MAPPING: ${JSON.stringify(input.mapping).slice(0, 2000)}
-`;
-  const r = await ai.run(model, { messages: [
-    { role: "system", content: sys },
-    { role: "user",  content: usr }
-  ]});
-  return ((): string => {
-    const raw = r?.response ?? r?.output_text ?? r?.result ?? r;
-    return typeof raw === "string" ? raw.trim() : JSON.stringify(raw ?? "");
-  })();
+function toText(r: any): string {
+  return (r?.response ?? r?.output_text ?? r?.result ?? r ?? "").toString();
 }

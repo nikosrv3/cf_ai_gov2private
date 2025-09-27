@@ -1,0 +1,77 @@
+CAPTAIN (RET.) MARCUS L. RIVERA
+
+Curriculum Vitae
+September 2025
+
+Security Clearance: TS/SCI (formerly held, adjudicated 2020; current status: Eligible)
+
+SUMMARY OF QUALIFICATIONS
+• Senior defense analyst with 15+ years of combined active-duty service and civilian defense policy experience specializing in logistics readiness, force sustainment modeling, and joint supply chain resilience.
+• Demonstrated record of leading interagency wargames, designing analytic models for contingency operations, and advising senior leadership on force posture decisions.
+• Experienced manager of classified and unclassified programs, proficient in program acquisition cycles, contract oversight, and DoD compliance frameworks (DoDI, DFARS).
+• Skilled communicator and instructor with multiple course development credits at professional military education institutions.
+
+EDUCATION & PROFESSIONAL MILITARY EDUCATION
+2014 M.S., Operations Research, Naval Postgraduate School
+2010 M.A., Security Studies, Georgetown University
+2006 B.S., Mechanical Engineering, United States Naval Academy
+
+Civilian Professional Development:
+• Advanced Logistics Executive Program, Defense Acquisition University, 2018
+• Joint Professional Military Education (JPME) Phase II equivalent, 2016
+
+MILITARY & CIVILIAN EXPERIENCE
+2021–Present
+Senior Defense Analyst, Strategic Readiness Directorate, Office of Defense Analysis (DoD), Arlington, VA
+• Lead analyst for the National Contingency Logistics Simulation (NCLS), a multi-year modeling program used to evaluate cross-theater sustainment strategies under mass-casualty and high-tempo conflict scenarios.
+• Coordinate with US Transportation Command (USTRANSCOM), Army Materiel Command (AMC), and commercial partners to validate logistics assumptions and perform sensitivity analyses on critical supply nodes.
+• Manage a $9M analytic contract portfolio, ensuring compliance with DoD reporting and financial controls.
+
+2017–2021
+Logistics Branch Head (GS-15 equivalent), Fleet Logistics Command (detail)
+• Directed a 45-person team responsible for global spare parts forecasting, depot maintenance prioritization, and rapid reconstitution planning in support of distributed maritime operations.
+• Implemented an improved forecasting algorithm that reduced critical parts shortages by 28% during surge exercises.
+
+2008–2017
+Active Duty — U.S. Navy (Officer)
+• Commanding Officer, USS Resolute (Patrol Logistic Vessel), 2014–2016
+• Operations Officer, Carrier Support Group, 2012–2014
+• Engineering Officer, Amphibious Ready Group, 2009–2012
+• Recognized for operational leadership during multinational exercises and humanitarian response deployments.
+
+SELECTED PROJECTS & ANALYSES
+• Principal Analyst — Theater Resilience & Redundancy Study (2022): Led modeling of alternative supply routes and assessed risk of chokepoints in Indo-Pacific logistic corridors.
+• Co-Author — "Adaptive Maintenance Prioritization Under Contested Logistics" (DoD Technical Memorandum, 2019): Proposed policy changes later incorporated into Fleet maintenance guidance.
+• Lead Planner — Interagency Logistics Tabletop Exercises (2018–2020): Designed scenarios and facilitated exercises with FEMA, USACE, and private-sector port operators.
+
+PUBLICATIONS & TECHNICAL REPORTS
+• Rivera ML, Chen K, "Modeling Spare-Parts Flow Under High-Intensity Conflict," Journal of Defense Logistics, 2023.
+• Defense Technical Memorandum 2019-07, "Adaptive Maintenance Prioritization Under Contested Logistics," Office of Defense Analysis, 2019.
+• Rivera ML, Patel S, "Interoperability Challenges in Civil-Military Disaster Response," Proceedings, Joint Logistics Symposium, 2021.
+
+TEACHING & OUTREACH
+• Guest Lecturer, National Defense University — Logistics and Sustainment Module (2022–Present).
+• Instructor, Fleet Logistics Officer Professional Development Course (2015–2018).
+
+AWARDS & DECORATIONS
+• Meritorious Service Medal (2 awards) — U.S. Navy
+• Department of Defense Civilian Service Commendation — 2022
+• Fleet Logistics Excellence Award — 2015
+
+TECHNICAL SKILLS
+• Modeling & Simulation: AnyLogic, MATLAB, Simul8
+• Data & Analytics: Python (pandas, numpy), R, SQL
+• Systems: SAP Logistics, GCSS-MC, DoD GFEBS
+• Security & Compliance: NIST SP 800-series awareness, ITAR basics
+
+SELECTED CLEARANCES & TRAINING
+• Former TS/SCI (Eligible)
+• DoD Cyber Awareness & Insider Threat training (annual completion)
+• Contracting oversight training (DAU)
+
+PROFESSIONAL AFFILIATIONS
+• Military Operations Research Society (MORS)
+• National Defense Transportation Association (NDTA)
+
+REFERENCES
+Available upon request (government and academic sponsors).

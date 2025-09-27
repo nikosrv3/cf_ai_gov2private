@@ -15,7 +15,6 @@ const EXAMPLE_PROMPTS = [
   { text: "Add bullet about team leadership", context: "bullets" },
   { text: "Replace job 1 bullet 2 with...", context: "experience" },
   { text: "Make all bullets more quantifiable", context: "bullets" },
-  { text: "Update education with MBA details", context: "education" },
 ];
 
 export default function ChatDock({ run, onReply }: ChatDockProps) {

@@ -10,7 +10,7 @@ import HistorySidebar from "./components/HistorySidebar";
 export default function App() {
   const location = useLocation();
   const [navOpen, setNavOpen] = useState(true);
-  const cols = navOpen ? "grid-cols-[320px_1fr]" : "grid-cols-[64px_1fr]";
+  const cols = navOpen ? "grid-cols-[320px_1fr]" : "grid-cols-[95px_1fr]";
 
   return (
     <div className={`min-h-screen grid ${cols} bg-slate-50 text-slate-900 transition-all duration-300`}>
@@ -44,7 +44,7 @@ export default function App() {
             <button
               onClick={() => setNavOpen(v => !v)}
               className={`p-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 transition-all ${
-                !navOpen ? "mx-auto mt-2" : ""
+                !navOpen ? "mx-auto mt-auto" : ""
               }`}
               title={navOpen ? "Collapse sidebar" : "Expand sidebar"}
             >

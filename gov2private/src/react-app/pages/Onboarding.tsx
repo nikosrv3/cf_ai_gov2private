@@ -103,7 +103,7 @@ export default function Onboarding() {
   return (
     <div className="max-w-3xl mx-auto">
       <form onSubmit={handleSubmit} className="bg-white border border-slate-200 rounded-2xl shadow-sm">
-        {busy && <Loading message="Analyzing your background..." fullScreen />}
+        {busy && <Loading message="Analyzing your background, this can take a minute ..." fullScreen />}
         
         {/* Header */}
         <div className="px-6 py-5 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100">

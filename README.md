@@ -160,5 +160,6 @@ Built entirely on Cloudflare's platform, this application demonstrates modern ed
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
+
 I used the cloudflare react+vite+hono template that can be found at [template](https://github.com/cloudflare/templates/tree/main/vite-react-template)
----
+
